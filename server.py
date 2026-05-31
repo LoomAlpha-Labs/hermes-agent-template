@@ -21,6 +21,13 @@ Once configured, / proxies to the Hermes dashboard. A small "← Setup" widget i
 injected into every proxied HTML response so users can always return to the wizard.
 """
 
+# PEP 563 lazy annotations: keeps function/parameter type hints as strings so
+# they're never evaluated at import. Avoids the startup DeprecationWarning from
+# annotating against websockets.WebSocketClientProtocol (renamed in websockets
+# >= 14), and is forward-compatible regardless of the installed websockets
+# version. Safe here — nothing in this module introspects annotations at runtime.
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -1266,15 +1273,22 @@ async def lifespan(app):
 
 
 # ── WebSocket reverse proxy ──────────────────────────────────────────────────
-# The hermes dashboard exposes 4 WebSocket endpoints when started with --tui.
-# Three are opened by the browser SPA and need to flow through our reverse
-# proxy; the fourth (/api/pub) is opened only by the PTY child against
-# loopback and is intentionally NOT proxied — exposing it would let an
-# authed user spam events into channels.
+# The hermes dashboard exposes several WebSocket endpoints when started with
+# --tui. The browser SPA opens these and they must flow through our reverse
+# proxy. /api/pub is opened only by the PTY child against loopback and is
+# intentionally NOT proxied — exposing it would let an authed user spam events
+# into channels. It lives at /api/pub (not under /api/plugins/), so the plugin
+# prefix route below does not match it.
 #
-#   /api/pty     binary stream — embedded TUI keystrokes/output
-#   /api/ws      JSON-RPC      — gateway sidecar driving Chat metadata
-#   /api/events  text frames   — dashboard subscriber for /api/pub fan-out
+#   /api/pty                  binary stream — embedded TUI keystrokes/output
+#   /api/ws                   JSON-RPC      — gateway sidecar driving Chat metadata
+#   /api/events               text frames   — dashboard subscriber for /api/pub fan-out
+#   /api/plugins/<name>/...   plugin-contributed sockets. Mounted by hermes
+#                             under /api/plugins/<name>/ (web_server.
+#                             _mount_plugin_api_routes), e.g. kanban's
+#                             /api/plugins/kanban/events live task feed. Added
+#                             in v0.15 — without a proxy route Starlette 403s
+#                             the upgrade and the SPA retries in a tight loop.
 #
 # Auth model (matches the HTTP proxy):
 #   * Edge: our HMAC cookie via _is_authenticated. WebSocket inherits .cookies
@@ -1282,7 +1296,7 @@ async def lifespan(app):
 #   * Upstream: hermes's own ?token=<_SESSION_TOKEN> query param. The SPA
 #     fetches that token via /api/auth/session-token and includes it in the
 #     WS URL, so we just forward path + query verbatim.
-PROXIED_WS_PATHS = ("/api/pty", "/api/ws", "/api/events")
+PROXIED_WS_PATHS = ("/api/pty", "/api/ws", "/api/events", "/api/plugins/*")
 
 
 async def _ws_pump_client_to_upstream(
@@ -1445,10 +1459,15 @@ routes = [
     # relative to the catch-all HTTP `Route("/{path:path}", ...)` below
     # doesn't matter — but listing them as a group keeps the surface
     # area auditable. Only paths in PROXIED_WS_PATHS are forwarded;
-    # /api/pub is intentionally omitted.
+    # /api/pub is intentionally omitted (not under /api/plugins/, so the
+    # prefix route below does not match it).
     WebSocketRoute("/api/pty",                  ws_proxy),
     WebSocketRoute("/api/ws",                   ws_proxy),
     WebSocketRoute("/api/events",               ws_proxy),
+    # Plugin-contributed sockets, mounted by hermes under /api/plugins/<name>/
+    # (e.g. kanban's /api/plugins/kanban/events). Prefix-matched so new plugin
+    # WS endpoints in future hermes releases proxy without re-touching this list.
+    WebSocketRoute("/api/plugins/{path:path}",  ws_proxy),
 
     # Root: redirect to /setup if unconfigured, otherwise proxy the dashboard.
     Route("/",                                  route_root,          methods=ANY_METHOD),
