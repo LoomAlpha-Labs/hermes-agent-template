@@ -552,6 +552,19 @@ def is_config_complete(data: dict[str, str] | None = None) -> bool:
         data = read_env(ENV_FILE)
     has_model = bool(data.get("LLM_MODEL"))
     has_provider = any(data.get(k) for k in PROVIDER_KEYS) or _has_xai_oauth_tokens()
+    if not has_provider:
+        # OAuth providers (e.g. openai-codex / ChatGPT subscription) are not
+        # env-key based, so PROVIDER_KEYS can't see them. Treat an explicitly
+        # configured non-auto provider in config.yaml as a complete config.
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            _cfg = _yaml.safe_load((_Path(HERMES_HOME) / "config.yaml").read_text()) or {}
+            _prov = ((_cfg.get("model") or {}).get("provider") or "").strip()
+            if _prov and _prov != "auto":
+                has_provider = True
+        except Exception:
+            pass
     return has_model and has_provider
 
 
