@@ -757,6 +757,16 @@ async def logout(request: Request) -> Response:
 
 
 # ── Gateway manager ───────────────────────────────────────────────────────────
+# Auto-respawn tuning. If the gateway exits without us asking it to — an in-band
+# `/restart` (which exits 75 expecting a supervisor to bring it back), a crash,
+# or an OOM kill — the supervisor restarts it. A crash-loop guard stops us from
+# hammering when the gateway genuinely can't stay up (e.g. bad config).
+RESPAWN_WINDOW_S   = 120    # rolling window for counting unexpected exits
+RESPAWN_MAX_IN_WIN = 5      # give up auto-restart after this many exits in window
+RESPAWN_BASE_DELAY = 2.0    # first backoff (seconds)
+RESPAWN_MAX_DELAY  = 30.0   # backoff cap
+
+
 class Gateway:
     def __init__(self):
         self.proc: asyncio.subprocess.Process | None = None
@@ -764,11 +774,18 @@ class Gateway:
         self.logs: deque[str] = deque(maxlen=500)
         self.started_at: float | None = None
         self.restarts = 0
+        # True while a deliberate stop()/restart() is in flight, so the exiting
+        # process's _drain() doesn't fire an auto-respawn that races the
+        # intentional lifecycle.
+        self._stopping = False
+        # Monotonic timestamps of recent unexpected exits (crash-loop guard).
+        self._recent_exits: list[float] = []
 
     async def start(self):
         if self.proc and self.proc.returncode is None:
             return
         self.state = "starting"
+        self._stopping = False
         try:
             # .env values take priority over Railway env vars.
             # We build the env this way so hermes's own dotenv loading
@@ -788,12 +805,13 @@ class Gateway:
             )
             self.state = "running"
             self.started_at = time.time()
-            asyncio.create_task(self._drain())
+            asyncio.create_task(self._drain(self.proc))
         except Exception as e:
             self.state = "error"
             self.logs.append(f"[error] Failed to start: {e}")
 
     async def stop(self):
+        self._stopping = True
         if not self.proc or self.proc.returncode is not None:
             self.state = "stopped"
             return
@@ -812,14 +830,67 @@ class Gateway:
         self.restarts += 1
         await self.start()
 
-    async def _drain(self):
-        assert self.proc and self.proc.stdout
-        async for raw in self.proc.stdout:
+    async def _drain(self, proc: asyncio.subprocess.Process):
+        assert proc.stdout
+        async for raw in proc.stdout:
             line = ANSI_ESCAPE.sub("", raw.decode(errors="replace").rstrip())
             self.logs.append(line)
-        if self.state == "running":
+        rc = proc.returncode
+        # Ignore the drain of a process we've already replaced via restart().
+        if proc is not self.proc:
+            return
+        # A deliberate stop()/restart() owns its own lifecycle — don't respawn.
+        if self._stopping:
+            return
+        # Unexpected exit: in-band `/restart` (exit 75), a crash, or an OOM
+        # kill. The gateway expects an external supervisor to bring it back —
+        # that's us. Without this the bot goes silent until a manual redeploy.
+        self.state = "error"
+        self.logs.append(f"[error] Gateway exited (code {rc}) — auto-restarting")
+        asyncio.create_task(self._supervise_respawn())
+
+    async def _supervise_respawn(self):
+        now = time.monotonic()
+        self._recent_exits = [t for t in self._recent_exits if now - t < RESPAWN_WINDOW_S]
+        self._recent_exits.append(now)
+        if len(self._recent_exits) > RESPAWN_MAX_IN_WIN:
             self.state = "error"
-            self.logs.append(f"[error] Gateway exited (code {self.proc.returncode})")
+            self.logs.append(
+                f"[error] Gateway crash-looping "
+                f"({len(self._recent_exits)} exits in {RESPAWN_WINDOW_S}s) — "
+                f"giving up auto-restart. Fix config via the admin UI, then "
+                f"restart the gateway or redeploy."
+            )
+            return
+        delay = min(RESPAWN_BASE_DELAY * 2 ** (len(self._recent_exits) - 1), RESPAWN_MAX_DELAY)
+        await asyncio.sleep(delay)
+        # Bail if a manual start() already brought a live gateway back, or if the
+        # gateway's own detached re-exec reconnected — avoids two pollers
+        # competing for Telegram updates (getUpdates 409).
+        if self.proc and self.proc.returncode is None:
+            return
+        if self._gateway_already_live():
+            self.logs.append("[gateway] external restart detected — skipping supervisor respawn")
+            return
+        self.restarts += 1
+        await self.start()
+
+    def _gateway_already_live(self) -> bool:
+        """Best-effort: has a *different* gateway process already reconnected?
+
+        Reads the gateway's own state file. On exit the gateway rewrites this to
+        "stopped", so right after an exit this returns False and we respawn. If
+        the gateway's detached self-restart wins the race first, it'll show
+        running+connected and we stand down.
+        """
+        try:
+            data = json.loads((Path(HERMES_HOME) / "gateway_state.json").read_text())
+        except Exception:
+            return False
+        if data.get("gateway_state") != "running":
+            return False
+        telegram = (data.get("platforms") or {}).get("telegram") or {}
+        return telegram.get("state") == "connected"
 
     def status(self) -> dict:
         uptime = int(time.time() - self.started_at) if self.started_at and self.state == "running" else None
