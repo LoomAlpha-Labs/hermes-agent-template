@@ -43,7 +43,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     cd /opt/hermes-agent && \
     uv pip install --system --no-cache -e ".[all,messaging,tts-premium,honcho,bedrock,anthropic,edge-tts,hindsight,vision]" && \
     python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
-    uv venv --system-site-packages /tmp/hermes-check && \
+    uv venv --python /usr/local/bin/python --system-site-packages /tmp/hermes-check && \
     uv pip install --python /tmp/hermes-check/bin/python pytest==9.1.1 pytest-asyncio==1.3.0 && \
     /tmp/hermes-check/bin/python -m pytest -q \
       tests/cron/test_scheduler_cron_session_isolation.py \
