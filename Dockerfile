@@ -8,7 +8,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 # newest tag (format `vYYYY.M.D`, optionally with a `.PATCH` suffix, e.g.
 # `v2026.5.29.2`) and update the default below. Use `main` only if you accept
 # that every rebuild can pull arbitrary new upstream commits.
-ARG HERMES_REF=v2026.6.5
+ARG HERMES_REF=v2026.9.14
 
 # tini = tiny init that we run as PID 1. Without it, hermes's grandchild
 # processes (MCP stdio servers, git, bun, browser daemons spawned by tools)
@@ -30,11 +30,11 @@ RUN apt-get update && \
 # Install hermes-agent (provides the `hermes` CLI) and pre-build its React
 # dashboard so `hermes dashboard` has nothing to build at runtime.
 #
-# [all] in v2026.6.5 no longer pulls in [dev]; messaging platforms, TTS, and
+# [all] does not pull in [dev]; messaging platforms, TTS, and
 # other heavy backends are lazy-installed by hermes at first use. We pre-install
 # the ones this template actually uses so first-message latency is instant.
-# `vision` (Pillow) is a soft-dep that is NOT in [all] and is otherwise
-# lazy-installed at first image use: without it hermes can't downscale an
+# Pillow is now a core dependency; keep the backward-compatible vision extra
+# listed explicitly. Without image handling hermes cannot downscale an
 # oversized image (>5 MB / >8000px), which then bakes into immutable history
 # and bricks the session on Anthropic's non-retryable 400. We bake it in.
 # When bumping HERMES_REF, re-check hermes-agent's pyproject.toml [all] and
@@ -42,6 +42,19 @@ RUN apt-get update && \
 RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
     cd /opt/hermes-agent && \
     uv pip install --system --no-cache -e ".[all,messaging,tts-premium,honcho,bedrock,anthropic,edge-tts,hindsight,vision]" && \
+    python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
+    uv venv --system-site-packages /tmp/hermes-check && \
+    uv pip install --python /tmp/hermes-check/bin/python pytest==9.1.1 pytest-asyncio==1.3.0 && \
+    /tmp/hermes-check/bin/python -m pytest -q \
+      tests/cron/test_scheduler_cron_session_isolation.py \
+      tests/gateway/test_session_hygiene_turnhold_adoption.py \
+      tests/agent/test_compression_small_ctx_threshold_floor.py \
+      tests/tui_gateway/test_compression_config_hot_reload.py \
+      tests/cron/test_cron_script.py \
+      tests/hermes_state/test_shared_session_db_registry.py \
+      tests/hermes_state/test_dedupe_migration_contention.py \
+      tests/gateway/test_session_db_handle_sharing.py && \
+    rm -rf /tmp/hermes-check && \
     cd /opt/hermes-agent/web && \
     npm install --silent && \
     npm run build && \

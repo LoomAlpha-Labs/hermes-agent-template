@@ -106,7 +106,7 @@ Open `http://localhost:8080` and log in with `admin` / `changeme`.
 
 ## Updating Hermes
 
-This template pins a specific Hermes Agent release in the `Dockerfile` (`ARG HERMES_REF`, currently `v2026.6.5`). To upgrade:
+This template pins a specific Hermes Agent release in the `Dockerfile` (`ARG HERMES_REF`, currently `v2026.9.14`). To upgrade:
 
 - **Recommended:** set a `HERMES_REF` service variable in Railway to any upstream [release tag](https://github.com/NousResearch/hermes-agent/releases) (e.g. `v2026.6.5`), then redeploy. It's passed in as a Docker build arg and overrides the Dockerfile default — no code change needed.
 - **Or** bump `ARG HERMES_REF` in the `Dockerfile` and redeploy.
@@ -117,3 +117,7 @@ The "Update" button inside the Hermes dashboard is a **no-op on Railway** (it de
 
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com/)
 - UI inspired by [OpenClaw](https://github.com/praveen-ks-2001/openclaw-railway) admin template
+
+### September 2026 runtime baseline
+
+The image now pins upstream `v2026.9.14` (Hermes 0.21.3). This release scopes cron approval context to each job and provides bounded gateway history-cleanup waits. Build-time import checks cover the gateway, scheduler, and cron context isolation key. Persistent configuration, credentials, conversations, workspace, and schedules remain on `/data`. Back up the SQLite databases with the SQLite backup API before upgrading an existing volume; use a private config/schedule backup as well. A rollback must account for database migrations, not just select the earlier image.
