@@ -48,4 +48,15 @@ fi
 # container), so removing the file unconditionally is safe.
 rm -f /data/.hermes/gateway.pid
 
+# Owner-enabled bounded research worker. It is a service process with its own
+# fixed collector, not an escape hatch for model-generated cron scripts.
+if [ "${JEV_LIVE_ENABLED:-0}" = "1" ]; then
+  (
+    while true; do
+      python /app/jev_worker.py || echo 'JEV worker stopped; restarting in 30s' >&2
+      sleep 30
+    done
+  ) &
+fi
+
 exec python /app/server.py
