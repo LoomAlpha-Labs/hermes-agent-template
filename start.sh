@@ -70,4 +70,9 @@ if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
   ) &
 fi
 
+# Only the already-forked fixed Bird worker needs the X session. Unknown custom
+# variables are not necessarily removed by Hermes's generic terminal filter.
+# Remove them before the admin server/gateway/agent tree starts.
+unset X_BIRD_AUTH_TOKEN X_BIRD_CT0 AUTH_TOKEN CT0
+
 exec python /app/server.py
