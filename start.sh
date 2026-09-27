@@ -59,4 +59,15 @@ if [ "${JEV_LIVE_ENABLED:-0}" = "1" ]; then
   ) &
 fi
 
+# Owner-requested hourly bookmarks. Credentials are used only by the fixed Bird
+# child; Jesse's cron precheck receives a private data snapshot without secrets.
+if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
+  (
+    while true; do
+      python /app/bookmark_worker.py || echo 'Bookmark worker stopped; restarting in 30s' >&2
+      sleep 30
+    done
+  ) &
+fi
+
 exec python /app/server.py

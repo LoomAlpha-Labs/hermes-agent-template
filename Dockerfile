@@ -82,6 +82,8 @@ RUN mkdir -p /data/.hermes
 
 COPY server.py /app/server.py
 COPY jev_worker.py /app/jev_worker.py
+COPY bookmark_worker.py /app/bookmark_worker.py
+RUN npm install --global --ignore-scripts @steipete/bird@0.8.0 && bird --version
 COPY templates/ /app/templates/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh

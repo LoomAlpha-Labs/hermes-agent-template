@@ -121,3 +121,19 @@ The "Update" button inside the Hermes dashboard is a **no-op on Railway** (it de
 ### September 2026 runtime baseline
 
 The image now pins upstream `v2026.9.14` (Hermes 0.21.3). This release scopes cron approval context to each job and provides bounded gateway history-cleanup waits. Build-time import checks cover the gateway, scheduler, and cron context isolation key. Persistent configuration, credentials, conversations, workspace, and schedules remain on `/data`. Back up the SQLite databases with the SQLite backup API before upgrading an existing volume; use a private config/schedule backup as well. A rollback must account for database migrations, not just select the earlier image.
+
+## Private bookmark worker
+
+Owner-enabled `X_BOOKMARK_REVIEW_ENABLED=1` starts `bookmark_worker.py` hourly.
+Set `X_BOOKMARK_REVIEW_JOB_ID` to the paused, worker-dispatched Hermes job named
+`hourly-x-bookmark-research`. The fixed Bird 0.8.0 command reads at most 100
+bookmarks using the service's `X_BIRD_AUTH_TOKEN` and `X_BIRD_CT0`; it has no posting
+command. Those variables are removed from the Jesse child environment. Hermes's
+cron credential filtering remains unchanged. No official paid X API is used.
+
+The signed wiki gate reads only `/data/.hermes/state/x-bookmark-review/snapshot.json`.
+No new/unfinished work means no model call. Publication receipts and confirmed
+Telegram delivery govern progress; errors keep the batch pending. The persistent
+worker deadline and singleton lock survive restarts. Disable with
+`X_BOOKMARK_REVIEW_ENABLED=0` and redeploy. Operational flow and recovery are in the
+wiki's `docs/x-bookmark-review.md`. This worker is independent of JEV.
