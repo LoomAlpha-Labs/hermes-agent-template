@@ -128,7 +128,8 @@ Owner-enabled `X_BOOKMARK_REVIEW_ENABLED=1` starts `bookmark_worker.py` hourly.
 Set `X_BOOKMARK_REVIEW_JOB_ID` to the active hourly Hermes job named
 `hourly-x-bookmark-research`. The fixed Bird 0.8.0 command reads at most 100
 bookmarks using the service's `X_BIRD_AUTH_TOKEN` and `X_BIRD_CT0`; it has no posting
-command. Those variables are removed from the Jesse child environment. Hermes's
+command. After the worker is forked, startup unsets those variables before launching the
+server/gateway/agent process tree. Hermes's
 cron credential filtering remains unchanged. No official paid X API is used.
 
 The signed wiki gate reads only `/data/.hermes/state/x-bookmark-review/snapshot.json`.
