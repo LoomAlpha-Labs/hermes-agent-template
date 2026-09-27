@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
-import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -63,23 +63,17 @@ def job_state(job_id):
     match = [j for j in rows if j.get('id') == job_id]
     if len(match) != 1 or match[0].get('name') != 'hourly-x-bookmark-research':
         raise ValueError('Bookmark review job is missing')
-    if match[0].get('enabled'):
-        raise ValueError('Duplicate scheduling: bookmark review must be worker-dispatched')
+    if not match[0].get('enabled'):
+        raise ValueError('Bookmark research schedule is paused')
     return match[0]
 
 
-def dispatch(job_id):
-    process = subprocess.Popen(['hermes', 'cron', 'run', job_id], cwd=ROOT,
-        env=jesse_env(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True)
-    try:
-        process.communicate(timeout=1500)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise ValueError('Jesse review timed out; unfinished batch retained')
-    if process.returncode:
-        raise ValueError('Jesse review dispatch failed; unfinished batch retained')
+def delivery_confirmed(job_id, since):
+    with sqlite3.connect('file:/data/.hermes/cron/executions.db?mode=ro', uri=True) as db:
+        rows = db.execute('SELECT status, delivery_outcome, started_at FROM executions WHERE job_id=? ORDER BY claimed_at DESC LIMIT 3', (job_id,)).fetchall()
+    return any(status == 'completed' and outcome == 'delivered' and at and
+               datetime.fromisoformat(at).timestamp() >= since - 5
+               for status, outcome, at in rows)
 
 
 def acknowledge(job_id, started, state_dir=STATE):
@@ -88,6 +82,10 @@ def acknowledge(job_id, started, state_dir=STATE):
     if at < started - 5 or job.get('last_status') != 'ok' or job.get('last_delivery_error'):
         raise ValueError('Jesse completion or Telegram delivery is unconfirmed')
     gate = load(state_dir / 'gate.json', {})
+    if at < gate.get('gate_run_at', float('inf')) - 5:
+        raise ValueError('Current review has not completed')
+    if gate.get('wakeAgent') and not delivery_confirmed(job_id, gate['gate_run_at']):
+        raise ValueError('Telegram delivery receipt is missing; retain report')
     done = load(state_dir / 'delivered.json', {'receipts': [], 'activated': False})
     targets = list(gate.get('deliver_receipts', []))
     if gate.get('batch'):
@@ -109,6 +107,7 @@ def acknowledge(job_id, started, state_dir=STATE):
         gate['failure_notified'] = gate['reason']
         atomic(state_dir / 'gate.json', gate)
     done['last_success_at'] = time.time()
+    done['last_ack_job_at'] = job['last_run_at']
     atomic(state_dir / 'delivered.json', done)
     return gate.get('status', 'unknown')
 
@@ -118,7 +117,6 @@ def cycle(state, status_path, job_id, clock=time.time):
     state.update(status='running', started_at=started, next_run_at=started + INTERVAL)
     atomic(status_path, state)
     try:
-        job_state(job_id)
         sync = subprocess.run(['bash', str(LIVE / 'wiki_git_pull.sh')],
             cwd=ROOT, env=jesse_env(os.environ), capture_output=True, timeout=120)
         verify_runtime()
@@ -137,9 +135,7 @@ def cycle(state, status_path, job_id, clock=time.time):
             # Never save/log raw stderr, response fragments or credentials.
             snapshot['status'] = 'failed'
         atomic(status_path.parent / 'snapshot.json', snapshot)
-        dispatch(job_id)
-        outcome = acknowledge(job_id, started, status_path.parent)
-        state.update(status='waiting', last_gate=outcome,
+        state.update(status='waiting',
                      collection_status=snapshot['status'], sync_ok=snapshot['sync_ok'])
         state.pop('error', None)
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -166,6 +162,17 @@ def main():
         while True:
             if time.time() >= state.get('next_run_at', 0):
                 cycle(state, path, job_id)
+            # Observe scheduler completion without dispatching or waking a model.
+            # Collection and research each have one owner; the cron stays hourly.
+            try:
+                job = job_state(job_id)
+                done = load(STATE / 'delivered.json', {})
+                if job.get('last_run_at') and job.get('last_run_at') != done.get('last_ack_job_at') and not job.get('fire_claim'):
+                    gate = load(STATE / 'gate.json', {})
+                    acknowledge(job_id, gate.get('gate_run_at', float('inf')))
+                    state.pop('review_error', None)
+            except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+                state['review_error'] = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
             state['heartbeat_at'] = time.time()
             atomic(path, state)
             time.sleep(15)
