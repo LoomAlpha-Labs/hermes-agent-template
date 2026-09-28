@@ -15,6 +15,10 @@ ROOT = Path('/data/.hermes/workspace/wiki')
 LIVE = Path('/data/.hermes/scripts')
 STATE = Path('/data/.hermes/state/x-bookmark-review')
 INTERVAL = 3600
+GENERATED_STATE_RULES = {
+    'wiki/investing/assets/gocollect-watch/state.json':
+        ('last_attempt_utc', 'last_good_utc'),
+}
 
 
 def atomic(path, value):
@@ -41,6 +45,89 @@ def bird_env(environ):
 def jesse_env(environ):
     return {k: v for k, v in environ.items()
             if k not in ('AUTH_TOKEN', 'CT0') and not k.startswith('X_BIRD_')}
+
+
+def _git(root, *args):
+    return subprocess.run(['git', *args], cwd=root, capture_output=True, timeout=30)
+
+
+def _json_candidate(payload, timestamp_fields):
+    try:
+        value = json.loads(payload)
+        if not isinstance(value, dict) or not isinstance(value.get('latest'), dict):
+            return None
+        stamp = next((value.get(field) for field in timestamp_fields if value.get(field)), None)
+        if not isinstance(stamp, str):
+            return None
+        freshness = datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+        return freshness, value
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def repair_generated_state_conflicts(root=ROOT):
+    """Resolve only timestamped generated-state conflicts; fail closed otherwise."""
+    result = _git(root, 'diff', '--name-only', '--diff-filter=U', '-z')
+    if result.returncode:
+        raise ValueError('Unable to inspect repository conflicts')
+    conflicts = [p.decode() for p in result.stdout.split(b'\0') if p]
+    if not conflicts:
+        return []
+    unknown = sorted(set(conflicts) - set(GENERATED_STATE_RULES))
+    if unknown:
+        raise ValueError('Repository conflict requires manual review: ' + ', '.join(unknown))
+
+    repaired = []
+    for relative in conflicts:
+        fields = GENERATED_STATE_RULES[relative]
+        candidates = []
+        # During an autostash conflict, stage 2 is updated upstream and stage 3
+        # is the preserved local state. Freshness wins; ties preserve local.
+        for stage, priority in ((1, 0), (2, 1), (3, 3)):
+            shown = _git(root, 'show', f':{stage}:{relative}')
+            if shown.returncode == 0:
+                parsed = _json_candidate(shown.stdout.decode(), fields)
+                if parsed:
+                    candidates.append((parsed[0], priority, parsed[1]))
+        path = root / relative
+        if path.exists():
+            parsed = _json_candidate(path.read_text(), fields)
+            if parsed:
+                candidates.append((parsed[0], 2, parsed[1]))
+        if not candidates:
+            raise ValueError('Generated-state conflict has no valid snapshot: ' + relative)
+        _, _, winner = max(candidates, key=lambda row: (row[0], row[1]))
+        temp = path.with_suffix(path.suffix + '.repair')
+        temp.write_text(json.dumps(winner, indent=2) + '\n')
+        temp.replace(path)
+        added = _git(root, 'add', '--', relative)
+        if added.returncode:
+            raise ValueError('Unable to stage generated-state repair: ' + relative)
+        # Clear the unmerged index without staging generated runtime state for an
+        # unrelated future commit. A newer local snapshot remains as a worktree
+        # modification; an upstream winner becomes clean.
+        unstaged = _git(root, 'reset', '-q', 'HEAD', '--', relative)
+        if unstaged.returncode:
+            raise ValueError('Unable to unstage generated-state repair: ' + relative)
+        repaired.append(relative)
+
+    remaining = _git(root, 'diff', '--name-only', '--diff-filter=U')
+    if remaining.returncode or remaining.stdout.strip():
+        raise ValueError('Repository still has unresolved conflicts after maintenance')
+    return repaired
+
+
+def sync_repository(root=ROOT, live=LIVE, environ=None):
+    """Run signed wiki sync, auto-healing the narrow generated-state allowlist."""
+    env = jesse_env(environ or os.environ)
+    command = ['bash', str(live / 'wiki_git_pull.sh')]
+    sync = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=120)
+    if sync.returncode == 0:
+        return sync
+    if not repair_generated_state_conflicts(root):
+        return sync
+    retry = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=120)
+    return retry
 
 
 def verify_runtime():
@@ -117,8 +204,7 @@ def cycle(state, status_path, job_id, clock=time.time):
     state.update(status='running', started_at=started, next_run_at=started + INTERVAL)
     atomic(status_path, state)
     try:
-        sync = subprocess.run(['bash', str(LIVE / 'wiki_git_pull.sh')],
-            cwd=ROOT, env=jesse_env(os.environ), capture_output=True, timeout=120)
+        sync = sync_repository()
         verify_runtime()
         snapshot = {'collected_at_utc': datetime.now(timezone.utc).isoformat(),
                     'sync_ok': sync.returncode == 0, 'status': 'failed'}
