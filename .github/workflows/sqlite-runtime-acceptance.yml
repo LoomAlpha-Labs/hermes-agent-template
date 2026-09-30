@@ -1,0 +1,40 @@
+name: SQLite runtime acceptance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-runtime-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build acceptance image
+        run: docker build --tag hermes-sqlite-acceptance:ci .
+
+      - name: Verify installed SQLite runtime
+        run: |
+          docker run --rm --network none \
+            --entrypoint /usr/local/bin/python \
+            hermes-sqlite-acceptance:ci \
+            /usr/local/libexec/hermes/verify-sqlite-runtime.py \
+            --expected-version 3.53.4 \
+            --expected-source-id "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc" \
+            --expected-library-prefix /opt/sqlite/lib
+
+      - name: Smoke-import service modules
+        run: |
+          docker run --rm --network none \
+            --workdir /app \
+            --env ADMIN_PASSWORD=acceptance-test-only \
+            --entrypoint /usr/local/bin/python \
+            hermes-sqlite-acceptance:ci \
+            -c "import server, uvicorn, run_agent, gateway.run, cron.scheduler; print('Service imports passed')"
