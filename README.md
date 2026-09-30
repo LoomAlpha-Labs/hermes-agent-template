@@ -104,6 +104,31 @@ docker run --rm -it -p 8080:8080 -e PORT=8080 -e ADMIN_PASSWORD=changeme -v herm
 
 Open `http://localhost:8080` and log in with `admin` / `changeme`.
 
+### SQLite runtime acceptance
+
+The image builds SQLite 3.53.4 from the official checksum-pinned amalgamation
+archive and makes that library the system loader's SQLite provider. This is
+intentional: installing a newer `sqlite3` command alone does not change the
+library used by Python's stdlib `sqlite3` module.
+
+The Docker build fails unless `/usr/local/bin/python` loads the pinned library
+from `/opt/sqlite/lib`, reports the pinned release/source ID, includes FTS5,
+and passes in-memory FTS5 `flush` and `integrity-check` operations. Recheck a
+built image without reading any persistent database:
+
+```bash
+docker run --rm --entrypoint /usr/local/bin/python hermes-agent \
+  /usr/local/libexec/hermes/verify-sqlite-runtime.py \
+  --expected-version 3.53.4 \
+  --expected-source-id "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc" \
+  --expected-library-prefix /opt/sqlite/lib
+```
+
+For storage maintenance, this image-level check is only the first gate. In an
+isolated candidate container, run the external Astra runtime probe and full
+synthetic storage test suite before any offline production-volume procedure.
+Do not treat `/health` or the presence of a new SQLite CLI as acceptance.
+
 ## Updating Hermes
 
 This template pins a specific Hermes Agent release in the `Dockerfile` (`ARG HERMES_REF`, currently `v2026.9.14`). To upgrade:

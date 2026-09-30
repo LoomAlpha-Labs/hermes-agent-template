@@ -1,4 +1,46 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS sqlite-builder
+
+# Keep SQLite independent of Debian's release cadence. The official archive
+# checksum is published at https://sqlite.org/download.html. The Python
+# verifier is run in both stages so a source, build, copy, or loader mismatch
+# fails the image build rather than appearing against a persistent database.
+ARG SQLITE_AUTOCONF=3530400
+ARG SQLITE_VERSION=3.53.4
+ARG SQLITE_SOURCE_ID="2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc"
+ARG SQLITE_ARCHIVE_SHA3_256=454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential ca-certificates curl && \
+    curl --fail --show-error --silent --location \
+      "https://sqlite.org/2026/sqlite-autoconf-${SQLITE_AUTOCONF}.tar.gz" \
+      --output /tmp/sqlite.tar.gz && \
+    python -c "import hashlib,pathlib; p=pathlib.Path('/tmp/sqlite.tar.gz'); expected='${SQLITE_ARCHIVE_SHA3_256}'; actual=hashlib.sha3_256(p.read_bytes()).hexdigest(); assert actual == expected, f'SQLite archive SHA3-256 mismatch: {actual}'" && \
+    mkdir /tmp/sqlite-src && \
+    tar -xzf /tmp/sqlite.tar.gz --strip-components=1 -C /tmp/sqlite-src && \
+    cd /tmp/sqlite-src && \
+    CFLAGS="-O2 -DSQLITE_ENABLE_FTS5" ./configure --prefix=/opt/sqlite --disable-static --enable-shared && \
+    make -j"$(nproc)" && \
+    make install
+
+COPY scripts/verify_sqlite_runtime.py /tmp/verify-sqlite-runtime.py
+RUN LD_LIBRARY_PATH=/opt/sqlite/lib \
+    python /tmp/verify-sqlite-runtime.py \
+      --expected-version "${SQLITE_VERSION}" \
+      --expected-source-id "${SQLITE_SOURCE_ID}" \
+      --expected-library-prefix /opt/sqlite/lib
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+ARG SQLITE_VERSION=3.53.4
+ARG SQLITE_SOURCE_ID="2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc"
+COPY --from=sqlite-builder /opt/sqlite/lib/ /opt/sqlite/lib/
+COPY scripts/verify_sqlite_runtime.py /usr/local/libexec/hermes/verify-sqlite-runtime.py
+RUN printf '%s\n' /opt/sqlite/lib > /etc/ld.so.conf.d/hermes-sqlite.conf && \
+    ldconfig && \
+    env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp \
+      /usr/local/bin/python /usr/local/libexec/hermes/verify-sqlite-runtime.py \
+        --expected-version "${SQLITE_VERSION}" \
+        --expected-source-id "${SQLITE_SOURCE_ID}" \
+        --expected-library-prefix /opt/sqlite/lib
 
 # Which hermes-agent revision to install. Accepts any git ref the upstream
 # repo publishes — a release tag (recommended for reproducibility) or a
@@ -88,6 +130,13 @@ COPY templates/ /app/templates/
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
+# Re-run after all apt and Python dependency installation so the final service
+# interpreter—not only the early runtime layer—must retain the pinned linkage.
+RUN env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp \
+      /usr/local/bin/python /usr/local/libexec/hermes/verify-sqlite-runtime.py \
+        --expected-version "${SQLITE_VERSION}" \
+        --expected-source-id "${SQLITE_SOURCE_ID}" \
+        --expected-library-prefix /opt/sqlite/lib
 ENV HOME=/data
 ENV HERMES_HOME=/data/.hermes
 
