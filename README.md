@@ -66,6 +66,7 @@ Message your Telegram bot. If you're a new user, a pairing request will appear i
 | `PORT` | `8080` | Web server port (set automatically by Railway) |
 | `ADMIN_USERNAME` | `admin` | Basic auth username |
 | `ADMIN_PASSWORD` | *(auto-generated)* | Basic auth password — if unset, a random password is printed to logs |
+| `CAPITAL_DASHBOARD_DIR` | `${HERMES_HOME}/state/capital-dashboard/current` | Directory containing the receipt-gated `dashboard.html` served at authenticated `/capital` and `/capital/` routes |
 | `HERMES_REF` | *(pinned in Dockerfile)* | Hermes Agent version to install (any upstream git tag/branch). Set this to override the Dockerfile default without editing code — see [Updating Hermes](#updating-hermes). |
 
 All other configuration (LLM provider, model, channels, tools) is managed through the admin dashboard.
@@ -87,9 +88,10 @@ Parallel (search), Firecrawl (scraping), Tavily (search), FAL (image gen), Brows
 ```
 Railway Container
 ├── Python Admin Server (Starlette + Uvicorn)
-│   ├── /            — Admin dashboard (Basic Auth)
+│   ├── /            — Native Hermes dashboard proxy (cookie auth)
+│   ├── /capital[/]  — Receipt-gated persistent capital dashboard (cookie auth)
 │   ├── /health      — Health check (no auth)
-│   └── /api/*       — Config, status, logs, gateway, pairing
+│   └── /setup/api/* — Config, status, logs, gateway, pairing
 └── hermes gateway   — Managed as async subprocess
 ```
 

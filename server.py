@@ -29,11 +29,13 @@ injected into every proxied HTML response so users can always return to the wiza
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import secrets
 import signal
+import stat
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -61,6 +63,10 @@ HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 PAIRING_TTL = 3600
+CAPITAL_DASHBOARD_DIR = Path(os.environ.get(
+    "CAPITAL_DASHBOARD_DIR",
+    str(Path(HERMES_HOME) / "state" / "capital-dashboard" / "current"),
+))
 
 # Native Hermes dashboard — runs on loopback, fronted by our reverse proxy.
 HERMES_DASHBOARD_HOST = "127.0.0.1"
@@ -1211,6 +1217,106 @@ async def api_pairing_revoke(request: Request):
     return JSONResponse({"ok": True})
 
 
+# ── Persistent capital dashboard ─────────────────────────────────────────────
+CAPITAL_DASHBOARD_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'none'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'self'; object-src 'none'; connect-src 'none'; "
+        "img-src 'self' data:; font-src 'self' data:; "
+        "style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    ),
+}
+
+
+def _read_regular_file(path: Path) -> bytes:
+    """Read a file without following a symlink at the final path component."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        with os.fdopen(fd, "rb", closefd=False) as file_obj:
+            return file_obj.read()
+    finally:
+        os.close(fd)
+
+
+def _load_capital_dashboard() -> tuple[bytes, str]:
+    """Return receipt-validated dashboard bytes and their SHA-256 digest."""
+    html_path = CAPITAL_DASHBOARD_DIR / "dashboard.html"
+    receipt_path = CAPITAL_DASHBOARD_DIR / "dashboard.html.receipt.json"
+
+    receipt_bytes = _read_regular_file(receipt_path)
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    if not isinstance(receipt, dict):
+        raise ValueError("receipt is not an object")
+
+    counts = receipt.get("counts")
+    if not isinstance(counts, dict):
+        raise ValueError("receipt counts are missing")
+    if (
+        receipt.get("stage") != "static_html_rendered"
+        or receipt.get("read_only") is not True
+        or receipt.get("network_requests") is not False
+        or type(counts.get("acceptance_checks_passed")) is not int
+        or counts["acceptance_checks_passed"] != 15
+        or type(counts.get("deployable_projects")) is not int
+        or counts["deployable_projects"] != 0
+    ):
+        raise ValueError("receipt acceptance gate failed")
+
+    claimed_digest = receipt.get("html_sha256")
+    if not isinstance(claimed_digest, str) or re.fullmatch(r"[0-9a-f]{64}", claimed_digest) is None:
+        raise ValueError("receipt HTML digest is invalid")
+
+    html = _read_regular_file(html_path)
+    actual_digest = hashlib.sha256(html).hexdigest()
+    if not secrets.compare_digest(actual_digest, claimed_digest):
+        raise ValueError("dashboard HTML digest does not match receipt")
+    return html, actual_digest
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """Apply weak comparison for an If-None-Match header on GET/HEAD."""
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if candidate == "*":
+            return True
+        if candidate.startswith("W/"):
+            candidate = candidate[2:].strip()
+        if candidate == etag:
+            return True
+    return False
+
+
+async def route_capital(request: Request) -> Response:
+    """Serve the accepted, read-only capital dashboard from persistent state."""
+    if err := guard(request):
+        return err
+
+    try:
+        html, digest = _load_capital_dashboard()
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return Response(
+            "Capital dashboard unavailable\n",
+            status_code=503,
+            media_type="text/plain",
+            headers=CAPITAL_DASHBOARD_HEADERS,
+        )
+
+    etag = f'"{digest}"'
+    headers = {**CAPITAL_DASHBOARD_HEADERS, "ETag": etag}
+    if _etag_matches(request.headers.get("if-none-match", ""), etag):
+        return Response(status_code=304, headers=headers)
+    return HTMLResponse(html, headers=headers)
+
+
 # ── Reverse proxy → Hermes dashboard ──────────────────────────────────────────
 _WIDGET_LINK_STYLE = (
     "background:rgba(20,24,31,0.92);backdrop-filter:blur(8px);"
@@ -1551,6 +1657,11 @@ routes = [
     Route("/setup/api/oauth/xai/start",         api_oauth_xai_start,  methods=["POST"]),
     Route("/setup/api/oauth/xai/status",        api_oauth_xai_status),
     Route("/setup/api/oauth/xai",               api_oauth_xai_delete, methods=["DELETE"]),
+
+    # Receipt-gated static dashboard from persistent storage. These exact routes
+    # must precede the dashboard proxy catch-all.
+    Route("/capital",                           route_capital,        methods=["GET", "HEAD"]),
+    Route("/capital/",                          route_capital,        methods=["GET", "HEAD"]),
 
     # /setup/* typos return a real 404 — not a silent proxy fallthrough.
     Route("/setup/{path:path}",                 route_setup_404,     methods=ANY_METHOD),
