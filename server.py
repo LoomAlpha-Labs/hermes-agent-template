@@ -1260,12 +1260,51 @@ def _load_capital_dashboard() -> tuple[bytes, str]:
     counts = receipt.get("counts")
     if not isinstance(counts, dict):
         raise ValueError("receipt counts are missing")
+    workbook_integrity = receipt.get("workbook_integrity")
+    coverage = receipt.get("data_coverage")
+    candidate_coverage = coverage.get("candidates") if isinstance(coverage, dict) else None
+    exact_market = coverage.get("exact_market") if isinstance(coverage, dict) else None
+    fundamentals = coverage.get("curated_fundamentals") if isinstance(coverage, dict) else None
+    coverage_counts = (
+        isinstance(candidate_coverage, dict)
+        and isinstance(exact_market, dict)
+        and isinstance(fundamentals, dict)
+        and type(candidate_coverage.get("total")) is int
+        and candidate_coverage["total"] == counts.get("candidates")
+        and type(exact_market.get("declared")) is int
+        and type(exact_market.get("requested")) is int
+        and type(exact_market.get("unsupported")) is int
+        and type(exact_market.get("resolved")) is int
+        and type(exact_market.get("unresolved")) is int
+        and exact_market["declared"] == exact_market["requested"] + exact_market["unsupported"]
+        and exact_market["requested"] == exact_market["resolved"] + exact_market["unresolved"]
+        and type(fundamentals.get("declared")) is int
+        and type(fundamentals.get("resolved")) is int
+        and type(fundamentals.get("unresolved")) is int
+        and fundamentals["declared"] == fundamentals["resolved"] + fundamentals["unresolved"]
+    )
+    current_receipt_gate = (
+        workbook_integrity == {"status": "PASS", "checks_passed": 15, "checks_total": 15}
+        and isinstance(coverage, dict)
+        and coverage.get("schema_version") == 1
+        and coverage.get("status") in {"PARTIAL", "COMPLETE"}
+        and isinstance(coverage.get("named_gaps"), list)
+        and coverage_counts
+    )
+    # Transitional read compatibility only: the promoter no longer accepts this
+    # schema, but the currently served immutable release must remain available
+    # while the route and new artifact roll out in either order.
+    legacy_receipt_gate = (
+        workbook_integrity is None
+        and coverage is None
+        and type(counts.get("acceptance_checks_passed")) is int
+        and counts["acceptance_checks_passed"] == 15
+    )
     if (
         receipt.get("stage") != "static_html_rendered"
         or receipt.get("read_only") is not True
         or receipt.get("network_requests") is not False
-        or type(counts.get("acceptance_checks_passed")) is not int
-        or counts["acceptance_checks_passed"] != 15
+        or not (current_receipt_gate or legacy_receipt_gate)
         or type(counts.get("deployable_projects")) is not int
         or counts["deployable_projects"] != 0
     ):

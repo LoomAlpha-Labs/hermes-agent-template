@@ -32,8 +32,21 @@ class CapitalRouteTests(unittest.TestCase):
             "stage": "static_html_rendered",
             "read_only": True,
             "network_requests": False,
+            "workbook_integrity": {
+                "status": "PASS",
+                "checks_passed": 15,
+                "checks_total": 15,
+            },
+            "data_coverage": {
+                "schema_version": 1,
+                "status": "PARTIAL",
+                "named_gaps": [{"code": "EXACT_MARKET_UNRESOLVED", "count": 1, "label": "One unresolved"}],
+                "candidates": {"total": 145},
+                "exact_market": {"declared": 3, "requested": 2, "unsupported": 1, "resolved": 1, "unresolved": 1},
+                "curated_fundamentals": {"declared": 17, "resolved": 17, "unresolved": 0},
+            },
             "counts": {
-                "acceptance_checks_passed": 15,
+                "candidates": 145,
                 "deployable_projects": 0,
             },
             "html_sha256": digest,
@@ -76,6 +89,18 @@ class CapitalRouteTests(unittest.TestCase):
         self.assertEqual(api_response.status_code, 401)
         self.assertEqual(api_response.json(), {"error": "Unauthorized"})
 
+    def test_legacy_current_release_remains_readable_during_schema_rollout(self):
+        html, receipt, _ = self._write_valid_dashboard()
+        receipt.pop("workbook_integrity")
+        receipt.pop("data_coverage")
+        receipt["counts"]["acceptance_checks_passed"] = 15
+        (self.dashboard_dir / "dashboard.html.receipt.json").write_text(
+            json.dumps(receipt), encoding="utf-8"
+        )
+        response = self.client.get("/capital", headers=self.auth_headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, html)
+
     def test_conditional_get_revalidates_then_returns_304(self):
         _, _, digest = self._write_valid_dashboard()
         response = self.client.get(
@@ -98,7 +123,9 @@ class CapitalRouteTests(unittest.TestCase):
                 {**receipt, "stage": "draft"},
                 {**receipt, "read_only": False},
                 {**receipt, "network_requests": True},
-                {**receipt, "counts": {**receipt["counts"], "acceptance_checks_passed": 14}},
+                {**receipt, "workbook_integrity": {**receipt["workbook_integrity"], "checks_passed": 14}},
+                {**receipt, "data_coverage": {**receipt["data_coverage"], "status": "UNKNOWN"}},
+                {**receipt, "data_coverage": {**receipt["data_coverage"], "exact_market": {**receipt["data_coverage"]["exact_market"], "resolved": 2}}},
                 {**receipt, "counts": {**receipt["counts"], "deployable_projects": 1}},
                 {**receipt, "html_sha256": "0" * 64},
             )
