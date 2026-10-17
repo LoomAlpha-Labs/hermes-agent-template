@@ -115,7 +115,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     cp -a /tmp/hermes-tui/. /opt/hermes-agent/ui-tui/ && \
     mkdir -p /opt/hermes-agent/hermes_cli/web_dist && \
     cp -a /tmp/hermes-web/. /opt/hermes-agent/hermes_cli/web_dist/ && \
-    rm -rf /tmp/hermes-icons /tmp/hermes-tui /tmp/hermes-web /tmp/hermes-requirements.txt /opt/hermes-agent/.git /root/.npm
+    rm -rf /tmp/hermes-icons /tmp/hermes-tui /tmp/hermes-web /opt/hermes-agent/.git /root/.npm
 ENV HERMES_WEB_DIST=/opt/hermes-agent/hermes_cli/web_dist
 RUN python -c "from pathlib import Path; from hermes_cli.version_info import get_version_info; from hermes_state_common import SCHEMA_VERSION; v=get_version_info(); assert v.base_version=='0.21.6' and v.commit=='818c13be1dc4fd28987e1e881a9408224afd4535' and SCHEMA_VERSION==31; assert Path('/opt/hermes-agent/ui-tui/dist/entry.js').is_file(); assert Path('/opt/hermes-agent/hermes_cli/web_dist/index.html').is_file(); print('Exact 0.21.6 identity, schema31 and frontend products passed')"
 
@@ -134,7 +134,8 @@ RUN python -c "from pathlib import Path; from hermes_cli.version_info import get
 # Keep the existing local small.en ASR policy on Python 3.14-compatible wheels.
 # The model/cache stays on the persistent volume; no model download during build.
 COPY media-requirements.txt /app/media-requirements.txt
-RUN uv pip install --system --no-cache -r /app/media-requirements.txt && \
+RUN uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt -r /app/media-requirements.txt && \
+    rm /tmp/hermes-requirements.txt && \
     python -c "import io,wave; from faster_whisper.audio import decode_audio; import ctranslate2,yt_dlp; b=io.BytesIO(); w=wave.open(b,'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(32000)); w.close(); b.seek(0); assert len(decode_audio(b,sampling_rate=16000))==16000; assert 'int8' in ctranslate2.get_supported_compute_types('cpu'); print('Media decode and CPU int8 passed')"
 
 COPY requirements.txt /app/requirements.txt
