@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Railway's startCommand overrides the image ENTRYPOINT. Restore the init
+# process when this script is PID 1 so orphaned browser children are reaped.
+# Under the Docker ENTRYPOINT (or on re-entry under tini), this guard is false.
+if [ "$$" -eq 1 ]; then
+  exec /usr/bin/tini -g -- "$0" "$@"
+fi
+
 # Mirror dashboard-ref-only's startup: create every directory hermes expects
 # and seed a default config.yaml if the volume is empty. Without these,
 # `hermes dashboard` endpoints that hit logs/, sessions/, cron/, etc. can fail
