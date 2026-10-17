@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS sqlite-builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS sqlite-builder
 
 # Keep SQLite independent of Debian's release cadence. The official archive
 # checksum is published at https://sqlite.org/download.html. The Python
@@ -28,7 +28,7 @@ RUN LD_LIBRARY_PATH=/opt/sqlite/lib \
       --expected-source-id "${SQLITE_SOURCE_ID}" \
       --expected-library-prefix /opt/sqlite/lib
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 ARG SQLITE_VERSION=3.53.4
 ARG SQLITE_SOURCE_ID="2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc"
@@ -50,7 +50,8 @@ RUN printf '%s\n' /opt/sqlite/lib > /etc/ld.so.conf.d/hermes-sqlite.conf && \
 # newest tag (format `vYYYY.M.D`, optionally with a `.PATCH` suffix, e.g.
 # `v2026.5.29.2`) and update the default below. Use `main` only if you accept
 # that every rebuild can pull arbitrary new upstream commits.
-ARG HERMES_REF=v2026.9.14
+ARG HERMES_REF=v0.21.6
+ARG HERMES_COMMIT=818c13be1dc4fd28987e1e881a9408224afd4535
 
 # tini = tiny init that we run as PID 1. Without it, hermes's grandchild
 # processes (MCP stdio servers, git, bun, browser daemons spawned by tools)
@@ -83,7 +84,17 @@ RUN apt-get update && \
 # the extras below against the new release's pyproject.toml.
 RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent && \
     cd /opt/hermes-agent && \
-    uv pip install --system --no-cache -e ".[all,messaging,tts-premium,honcho,bedrock,anthropic,edge-tts,hindsight,vision]" && \
+    test "$(git rev-parse HEAD)" = "${HERMES_COMMIT}" && \
+    uv export --frozen --no-dev --no-hashes --no-emit-project \
+      --extra all --extra messaging --extra tts-premium \
+      --extra bedrock --extra anthropic --extra edge-tts --extra vision \
+      --output-file /tmp/hermes-requirements.txt && \
+    uv pip install --system --no-cache --no-deps -r /tmp/hermes-requirements.txt && \
+    uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt honcho-ai==2.2.0 hindsight-client==0.6.1 && \
+    uv pip install --system --no-cache --no-deps -e . && \
+    python scripts/write_install_stamp.py --output install-stamp.json \
+      --commit "${HERMES_COMMIT}" --base-version 0.21.6 --distance 0 \
+      --source ci --distribution docker --update-mechanism external && \
     python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
     uv venv --python /usr/local/bin/python --system-site-packages /tmp/hermes-check && \
     uv pip install --python /tmp/hermes-check/bin/python pytest==9.1.1 pytest-asyncio==1.3.0 && \
@@ -97,13 +108,15 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
       tests/hermes_state/test_dedupe_migration_contention.py \
       tests/gateway/test_session_db_handle_sharing.py && \
     rm -rf /tmp/hermes-check && \
-    cd /opt/hermes-agent/web && \
-    npm install --silent && \
-    npm run build && \
-    cd /opt/hermes-agent/ui-tui && \
-    npm install --silent --no-fund --no-audit --progress=false && \
-    npm run build && \
-    rm -rf /opt/hermes-agent/web /opt/hermes-agent/.git /root/.npm
+    python scripts/generate_icons.py --source /opt/hermes-agent --out /tmp/hermes-icons && \
+    node scripts/build/node-deps.mjs --source /opt/hermes-agent --workspace ui-tui --workspace web && \
+    node scripts/build/tui.mjs --source /opt/hermes-agent --out /tmp/hermes-tui && \
+    node scripts/build/web.mjs --source /opt/hermes-agent --icons /tmp/hermes-icons --out /tmp/hermes-web && \
+    cp -a /tmp/hermes-tui/. /opt/hermes-agent/ui-tui/ && \
+    mkdir -p /opt/hermes-agent/hermes_cli/web_dist && \
+    cp -a /tmp/hermes-web/. /opt/hermes-agent/hermes_cli/web_dist/ && \
+    rm -rf /tmp/hermes-icons /tmp/hermes-tui /tmp/hermes-web /tmp/hermes-requirements.txt /opt/hermes-agent/.git /root/.npm
+ENV HERMES_WEB_DIST=/opt/hermes-agent/hermes_cli/web_dist
 
 # Why pre-build ui-tui (and why we don't delete it after):
 # - The dashboard's embedded Chat tab spawns `node ui-tui/dist/entry.js`
