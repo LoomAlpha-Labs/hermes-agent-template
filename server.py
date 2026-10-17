@@ -56,6 +56,12 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.templating import Jinja2Templates
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
+from runtime_readiness import (
+    collect_runtime_readiness,
+    lifecycle_receipt,
+    write_runtime_receipt,
+)
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -67,6 +73,11 @@ CAPITAL_DASHBOARD_DIR = Path(os.environ.get(
     "CAPITAL_DASHBOARD_DIR",
     str(Path(HERMES_HOME) / "state" / "capital-dashboard" / "current"),
 ))
+RUNTIME_READINESS_RECEIPT = Path(HERMES_HOME) / "state" / "runtime-readiness.json"
+RUNTIME_READINESS_INTERVAL_S = 5
+RUNTIME_READINESS_MAX_AGE_S = 15
+_runtime_snapshot = lifecycle_receipt("starting")
+_runtime_snapshot_at = 0.0
 
 # Native Hermes dashboard — runs on loopback, fronted by our reverse proxy.
 HERMES_DASHBOARD_HOST = "127.0.0.1"
@@ -1031,6 +1042,40 @@ async def route_health(request: Request):
     return JSONResponse({"status": "ok", "gateway": gw.state})
 
 
+def _collect_runtime_readiness() -> dict:
+    gateway_pid = gw.proc.pid if gw.proc and gw.proc.returncode is None else None
+    dashboard_pid = dash.proc.pid if dash.proc and dash.proc.returncode is None else None
+    return collect_runtime_readiness(
+        hermes_home=HERMES_HOME,
+        configured=is_config_complete(),
+        gateway_state=gw.state,
+        gateway_pid=gateway_pid,
+        dashboard_pid=dashboard_pid,
+        dashboard_url=HERMES_DASHBOARD_URL,
+    )
+
+
+async def route_readiness(request: Request):
+    """Return a minimal cached summary without blocking the event loop."""
+    receipt = _runtime_snapshot
+    age = time.monotonic() - _runtime_snapshot_at if _runtime_snapshot_at else None
+    fresh = age is not None and age <= RUNTIME_READINESS_MAX_AGE_S
+    commit_sha = receipt["deployment"].get("commit_sha") or ""
+    identity_valid = bool(re.fullmatch(r"[0-9a-f]{40}", commit_sha))
+    ready = bool(receipt.get("ready")) and fresh and identity_valid
+    public = {
+        "status": "ready" if ready else "not_ready",
+        "checked_at": receipt["checked_at"],
+        "commit_sha_prefix": commit_sha[:12] or None,
+        "fresh": fresh,
+    }
+    return JSONResponse(
+        public,
+        status_code=200 if ready else 503,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 async def api_config_get(request: Request):
     if err := guard(request): return err
     async with cfg_lock:
@@ -1498,15 +1543,48 @@ async def auto_start():
         print("[server] Config incomplete — gateway not started. Configure provider + model in the admin UI.", flush=True)
 
 
+async def monitor_runtime_readiness() -> None:
+    """Refresh the private receipt and in-memory public snapshot continuously."""
+    global _runtime_snapshot, _runtime_snapshot_at
+    while True:
+        receipt = await asyncio.to_thread(_collect_runtime_readiness)
+        _runtime_snapshot = receipt
+        _runtime_snapshot_at = time.monotonic()
+        try:
+            await asyncio.to_thread(
+                write_runtime_receipt, receipt, RUNTIME_READINESS_RECEIPT
+            )
+        except OSError as exc:
+            print(f"[server] failed to write runtime readiness receipt: {exc!r}", flush=True)
+        await asyncio.sleep(RUNTIME_READINESS_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app):
     # Dashboard runs always — it's the user-facing UI after setup is done,
     # and it's independent of gateway state.
+    global _runtime_snapshot, _runtime_snapshot_at
+    starting = lifecycle_receipt("starting")
+    _runtime_snapshot = starting
+    _runtime_snapshot_at = time.monotonic()
+    await asyncio.to_thread(write_runtime_receipt, starting, RUNTIME_READINESS_RECEIPT)
     asyncio.create_task(dash.start())
     await auto_start()
+    receipt_task = asyncio.create_task(monitor_runtime_readiness())
     try:
         yield
     finally:
+        receipt_task.cancel()
+        await asyncio.gather(receipt_task, return_exceptions=True)
+        stopping = lifecycle_receipt("stopping")
+        _runtime_snapshot = stopping
+        _runtime_snapshot_at = time.monotonic()
+        try:
+            await asyncio.to_thread(
+                write_runtime_receipt, stopping, RUNTIME_READINESS_RECEIPT
+            )
+        except OSError as exc:
+            print(f"[server] failed to write stopping receipt: {exc!r}", flush=True)
         await asyncio.gather(
             gw.stop(),
             dash.stop(),
@@ -1673,6 +1751,7 @@ ANY_METHOD = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 routes = [
     # Public — no auth required.
     Route("/health",                            route_health),
+    Route("/health/ready",                      route_readiness),
     Route("/login",                             page_login,          methods=["GET"]),
     Route("/login",                             login_post,          methods=["POST"]),
     Route("/logout",                            logout),

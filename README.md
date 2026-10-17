@@ -90,12 +90,51 @@ Railway Container
 ├── Python Admin Server (Starlette + Uvicorn)
 │   ├── /            — Native Hermes dashboard proxy (cookie auth)
 │   ├── /capital[/]  — Receipt-gated persistent capital dashboard (cookie auth)
-│   ├── /health      — Health check (no auth)
+│   ├── /health      — Lightweight Railway liveness check (no auth)
+│   ├── /health/ready — Secret-free gateway/dashboard/storage/process readiness
 │   └── /setup/api/* — Config, status, logs, gateway, pairing
 └── hermes gateway   — Managed as async subprocess
 ```
 
+The server writes a private deployment-scoped readiness receipt to
+`$HERMES_HOME/state/runtime-readiness.json`. It includes the full Railway
+deployment/replica identifiers and is mode `0600`; `/health/ready` exposes only
+status, freshness and the deployed commit prefix. The receipt is set to
+`starting` before child startup, refreshed every five seconds, and set to
+`stopping` during graceful shutdown. Verifiers must require the expected
+deployment ID and a fresh `checked_at`. Keep Railway's own health check on
+`/health` so an intentionally unconfigured first boot can still reach `/setup`.
+
 The admin server runs on `$PORT` and manages the Hermes gateway as a child process. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
+
+## Verified self-redeploy
+
+A running agent can ask Railway's existing GitHub integration to replace its
+container without holding a Railway API token. The controller creates a
+metadata-only commit through GitHub's Git Data API; it never force-updates the
+branch and refuses if the live deployment SHA is not still the branch head.
+Dry-run is the default:
+
+```bash
+python /app/scripts/request_redeploy.py --reason "operator maintenance"
+python /app/scripts/request_redeploy.py --reason "operator maintenance" --execute
+```
+
+The GitHub ref update completes before the old container is stopped. The command
+does not call that success: it waits for a GitHub deployment record for the new
+SHA and fails explicitly if Railway Watch Paths or disabled autodeploy prevent
+one from appearing. Railway then owns build/replacement and publishes external
+deployment status. After the replacement boots, verify all three distinct receipts:
+
+1. GitHub/Railway deployment status is `success` for the requested commit.
+2. `/health/ready` reports that same commit prefix and `status: ready`.
+3. The fresh private volume receipt has the new deployment ID, a lock/runtime-
+   verified gateway with a connected platform and healthy session store, a
+   loopback HTTP-verified dashboard, readable state DB, cron/session directories,
+   adequate PID headroom and zero zombies.
+
+The controller intentionally creates repository history. Use it only for an
+explicit restart/redeploy decision, not as a liveness loop or automatic cron.
 
 ## Running Locally
 
