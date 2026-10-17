@@ -3,4 +3,4 @@ yt-dlp-ejs==0.8.0
 faster-whisper==1.2.1
 ctranslate2==4.8.2
 onnxruntime==1.30.0
-av==19.0.1
+av==18.0.0
