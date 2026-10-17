@@ -90,8 +90,8 @@ Railway Container
 ├── Python Admin Server (Starlette + Uvicorn)
 │   ├── /            — Native Hermes dashboard proxy (cookie auth)
 │   ├── /capital[/]  — Receipt-gated persistent capital dashboard (cookie auth)
-│   ├── /health      — Lightweight Railway liveness check (no auth)
-│   ├── /health/ready — Secret-free gateway/dashboard/storage/process readiness
+│   ├── /health      — Lightweight process liveness check (no auth)
+│   ├── /health/ready — Railway rollout gate: revision/gateway/storage/process readiness
 │   └── /setup/api/* — Config, status, logs, gateway, pairing
 └── hermes gateway   — Managed as async subprocess
 ```
@@ -102,8 +102,11 @@ deployment/replica identifiers and is mode `0600`; `/health/ready` exposes only
 status, freshness and the deployed commit prefix. The receipt is set to
 `starting` before child startup, refreshed every five seconds, and set to
 `stopping` during graceful shutdown. Verifiers must require the expected
-deployment ID and a fresh `checked_at`. Keep Railway's own health check on
-`/health` so an intentionally unconfigured first boot can still reach `/setup`.
+deployment ID and a fresh `checked_at`. Railway uses `/health/ready` as its
+external rollout gate. On an intentionally unconfigured first boot, gateway and
+state DB are optional while deployment identity, dashboard readiness, storage
+directories, PID headroom and zero-zombie checks still gate activation, so the
+user can safely reach `/setup`.
 
 The admin server runs on `$PORT` and manages the Hermes gateway as a child process. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
 
@@ -126,7 +129,8 @@ SHA and fails explicitly if Railway Watch Paths or disabled autodeploy prevent
 one from appearing. Railway then owns build/replacement and publishes external
 deployment status. After the replacement boots, verify all three distinct receipts:
 
-1. GitHub/Railway deployment status is `success` for the requested commit.
+1. GitHub/Railway deployment status is `success` for the requested commit; that
+   status now means Railway's `/health/ready` rollout gate passed.
 2. `/health/ready` reports that same commit prefix and `status: ready`.
 3. The fresh private volume receipt has the new deployment ID, a lock/runtime-
    verified gateway with a connected platform and healthy session store, a
