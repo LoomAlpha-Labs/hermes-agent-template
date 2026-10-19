@@ -1,0 +1,79 @@
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index af5b60cf..fd760d56 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -1712,7 +1712,17 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+             self._write_runtime_status_safe(
+                 "connected", platform_state="connected", error_code=None, error_message=None,
+             )
++        was_degraded = self._send_path_degraded
+         self._send_path_degraded = False
++        # In-place recovery does not run the adapter-replacement replay hook.
++        # Reuse the ledger's atomic claim so already-delivered replies stay sent.
++        replay = getattr(getattr(self, "gateway_runner", None), "_redeliver_failed_obligations_for_platform", None)
++        if was_degraded and callable(replay):
++            task = asyncio.get_running_loop().create_task(
++                replay(self.platform, profile=getattr(self, "_owner_profile", None)))
++            self._background_tasks.add(task)
++            task.add_done_callback(self._background_tasks.discard)
++            task.add_done_callback(_consume_abandoned_task)
+         return True
+ 
+     def _observe_polling_request_result(self, request, generation, result):
+@@ -2150,7 +2160,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+                 # No get_me() ⇒ not a live polling client (torn down / test double): exit, don't spin.
+                 if not callable(getattr(bot, "get_me", None)):
+                     return
+-                await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
++                await asyncio.wait_for(
++                    bot.get_me(connect_timeout=3.0, read_timeout=5.0, pool_timeout=2.0), PROBE_TIMEOUT)
+                 # get_me() refreshes PTB's cached bot user: adopt a BotFather rename before routing on it.
+                 self._bot_identity_checked_at = time.monotonic()
+                 self._note_bot_username(getattr(bot, "username", None))
+@@ -3633,7 +3644,16 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+                 return SendResult(success=False, error="Not connected", retryable=True)
+         # getattr() — tests build adapters via object.__new__() (no __init__).
+         if getattr(self, "_send_path_degraded", False):
+-            return SendResult(success=False, error="send_path_degraded", retryable=True)
++            # An in-place polling restart retains _bot. Wait for its actual I/O
++            # proof, otherwise the outer 2s/4s retries expire before recovery.
++            progress = getattr(self, "_polling_progress_event", None)
++            if getattr(self, "_running", False) and progress is not None and not self._is_permanent_fatal():
++                try:
++                    await asyncio.wait_for(progress.wait(), timeout=30.0)
++                except asyncio.TimeoutError:
++                    pass
++            if getattr(self, "_send_path_degraded", False):
++                return SendResult(success=False, error="send_path_degraded", retryable=True)
+         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
+         if not content or not content.strip():
+             return SendResult(success=True, message_id=None)
+diff --git a/plugins/platforms/telegram/telegram_network.py b/plugins/platforms/telegram/telegram_network.py
+index 8a21799f..8e49e3d8 100644
+--- a/plugins/platforms/telegram/telegram_network.py
++++ b/plugins/platforms/telegram/telegram_network.py
+@@ -181,11 +181,15 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
+                                 "[Telegram] Sticky Telegram path %s failed; re-walking IPv4 literals before the hostname",
+                                 ip if ip is not None else "api.telegram.org")
+                 if ip is None:
+-                    await self._reset_primary(transport)
++                    if not isinstance(exc, httpx.PoolTimeout):
++                        await self._reset_primary(transport)
+                     logger.warning("[Telegram] Dual-stack api.telegram.org path failed (%s)", failure)
+                     continue
+                 logger.warning("[Telegram] IPv4 Telegram API IP %s failed: %s", ip, failure)
+-                await self._reset_fallback(ip)
++                # A full pool may contain healthy in-flight sends. Leave it
++                # intact; only this unsent request moves to another endpoint.
++                if not isinstance(exc, httpx.PoolTimeout):
++                    await self._reset_fallback(ip)
+                 continue
+         if last_error is None:
+             raise RuntimeError("All Telegram fallback IPs exhausted but no error was recorded")
+@@ -304,4 +308,5 @@ def _rewrite_request_for_ip(request: httpx.Request, ip: str) -> httpx.Request:
+ 
+ 
+ def _is_retryable_connect_error(exc: Exception) -> bool:
+-    return isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError))
++    # PoolTimeout guarantees no request was sent; a fresh path is safe.
++    return isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout))
