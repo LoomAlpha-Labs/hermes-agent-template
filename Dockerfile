@@ -138,6 +138,26 @@ RUN uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt
     rm /tmp/hermes-requirements.txt && \
     python -c "import io,wave; from faster_whisper.audio import decode_audio; import ctranslate2,yt_dlp; b=io.BytesIO(); w=wave.open(b,'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(32000)); w.close(); b.seek(0); assert len(decode_audio(b,sampling_rate=16000))==16000; assert 'int8' in ctranslate2.get_supported_compute_types('cpu'); print('Media decode and CPU int8 passed')"
 
+# Narrow backport on the pinned upstream runtime; fail closed if it no longer applies.
+COPY patches/ /tmp/telegram-recovery/
+RUN cd /opt/hermes-agent && \
+    cp /tmp/telegram-recovery/test_telegram_recovery_backport.py tests/gateway/ && \
+    uv venv --python /usr/local/bin/python --system-site-packages /tmp/telegram-check && \
+    uv pip install --python /tmp/telegram-check/bin/python pytest==9.1.1 pytest-asyncio==1.3.0 && \
+    (HERMES_PYTHON=/tmp/telegram-check/bin/python bash scripts/run_tests.sh -j 1 \
+      tests/gateway/test_telegram_recovery_backport.py > /tmp/telegram-before.txt 2>&1; \
+      result=$?; cat /tmp/telegram-before.txt; test "$result" -ne 0) && \
+    git apply --check /tmp/telegram-recovery/telegram-recovery.patch && \
+    git apply /tmp/telegram-recovery/telegram-recovery.patch && \
+    HERMES_PYTHON=/tmp/telegram-check/bin/python bash scripts/run_tests.sh -j 2 \
+      tests/gateway/test_telegram_recovery_backport.py \
+      tests/gateway/test_telegram_network.py \
+      tests/gateway/test_telegram_send_reconnect_wait.py \
+      tests/gateway/test_telegram_send_path_health.py \
+      tests/gateway/test_telegram_polling_health_confirmation.py \
+      tests/gateway/test_telegram_network_reconnect.py && \
+    rm -rf /tmp/telegram-check /tmp/telegram-recovery
+
 COPY requirements.txt /app/requirements.txt
 RUN uv pip install --system --no-cache -r /app/requirements.txt
 

@@ -210,3 +210,17 @@ Hermes separately schedules the hourly review after collection. It never manuall
 dispatches jobs. The worker checks completed delivery receipts without a model. Disable with
 `X_BOOKMARK_REVIEW_ENABLED=0` and redeploy. Operational flow and recovery are in the
 wiki's `docs/x-bookmark-review.md`. This worker is independent of JEV.
+
+### Telegram recovery backport (October 19, 2026)
+
+The pinned 0.21.6 image carries `patches/telegram-recovery.patch`. A pool-acquisition
+ timeout is known not to have sent a request, so it can safely try another Telegram
+endpoint. Read/write timeouts remain non-retryable at this transport layer.
+Heartbeat probes have a short per-path connection budget so fallback can finish
+inside the probe deadline. Replies wait up to 30 seconds for proven polling
+recovery, and in-place recovery replays failed ledger obligations through the
+existing atomic-claim path. Routing, credentials, models and schedules are unchanged.
+
+The image build reproduces the regressions on the base and runs the recovery and
+existing Telegram suites after applying the patch. Recheck/remove the backport
+when upgrading upstream; patch application fails closed on conflicting changes.
