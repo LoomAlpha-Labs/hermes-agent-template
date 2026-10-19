@@ -42,6 +42,7 @@ async def test_in_place_recovery_replays_ledger_once_for_owner():
 @pytest.mark.asyncio
 async def test_pool_exhaustion_uses_another_path_without_replaying_sent_request(monkeypatch):
     calls = []
+    closed = []
     class Transport(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             calls.append(request.url.host)
@@ -49,11 +50,12 @@ async def test_pool_exhaustion_uses_another_path_without_replaying_sent_request(
                 raise httpx.PoolTimeout("not sent")
             return httpx.Response(200, text="ok")
         async def aclose(self):
-            pass
+            closed.append(self)
     monkeypatch.setattr(net.httpx, "AsyncHTTPTransport", lambda **kw: Transport())
     transport = net.TelegramFallbackTransport(["149.154.166.110", "149.154.167.220"])
     response = await transport.handle_async_request(httpx.Request("POST", "https://api.telegram.org/botTEST/getMe"))
     assert response.status_code == 200
     assert calls == ["149.154.166.110", "149.154.167.220"]
+    assert closed == []  # Do not abort other sends occupying the busy pool.
     assert not net._is_retryable_connect_error(httpx.ReadTimeout("ambiguous send"))
     await transport.aclose()

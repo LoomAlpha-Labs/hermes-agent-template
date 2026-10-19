@@ -49,10 +49,28 @@ index af5b60cf..fd760d56 100644
          if not content or not content.strip():
              return SendResult(success=True, message_id=None)
 diff --git a/plugins/platforms/telegram/telegram_network.py b/plugins/platforms/telegram/telegram_network.py
-index 8a21799f..8a814557 100644
+index 8a21799f..8e49e3d8 100644
 --- a/plugins/platforms/telegram/telegram_network.py
 +++ b/plugins/platforms/telegram/telegram_network.py
-@@ -304,4 +304,5 @@ def _rewrite_request_for_ip(request: httpx.Request, ip: str) -> httpx.Request:
+@@ -181,11 +181,15 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
+                                 "[Telegram] Sticky Telegram path %s failed; re-walking IPv4 literals before the hostname",
+                                 ip if ip is not None else "api.telegram.org")
+                 if ip is None:
+-                    await self._reset_primary(transport)
++                    if not isinstance(exc, httpx.PoolTimeout):
++                        await self._reset_primary(transport)
+                     logger.warning("[Telegram] Dual-stack api.telegram.org path failed (%s)", failure)
+                     continue
+                 logger.warning("[Telegram] IPv4 Telegram API IP %s failed: %s", ip, failure)
+-                await self._reset_fallback(ip)
++                # A full pool may contain healthy in-flight sends. Leave it
++                # intact; only this unsent request moves to another endpoint.
++                if not isinstance(exc, httpx.PoolTimeout):
++                    await self._reset_fallback(ip)
+                 continue
+         if last_error is None:
+             raise RuntimeError("All Telegram fallback IPs exhausted but no error was recorded")
+@@ -304,4 +308,5 @@ def _rewrite_request_for_ip(request: httpx.Request, ip: str) -> httpx.Request:
  
  
  def _is_retryable_connect_error(exc: Exception) -> bool:
