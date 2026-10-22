@@ -25,7 +25,7 @@ class WorkerTests(unittest.TestCase):
 
     def _conflicted_repo(self):
         temp = tempfile.TemporaryDirectory(); root = Path(temp.name)
-        self._git(root, 'init'); self._git(root, 'config', 'user.email', 'test@example.com')
+        self._git(root, 'init', '-b', 'master'); self._git(root, 'config', 'user.email', 'test@example.com')
         self._git(root, 'config', 'user.name', 'Test')
         path = self._write_state(root, self._state('2026-09-28T10:00:00Z', 1))
         (root / 'notes.txt').write_text('base\n')
@@ -55,7 +55,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_unknown_conflict_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); self._git(root, 'init')
+            root = Path(td); self._git(root, 'init', '-b', 'master')
             self._git(root, 'config', 'user.email', 'test@example.com')
             self._git(root, 'config', 'user.name', 'Test')
             (root / 'human.md').write_text('base\n'); self._git(root, 'add', '.')
@@ -76,10 +76,12 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
 
     def test_credentials_are_separated(self):
-        env={'PATH':'bin','X_BIRD_AUTH_TOKEN':'x-secret','X_BIRD_CT0':'csrf-secret',
+        env={'PATH':'bin','X_BIRD_AUTH_TOKEN':'x-secret','X_BIRD_CT0':'csrf-secret', 'X_OAUTH_CLIENT_SECRET':'oauth-secret',
+             'X_BOOKMARK_OAUTH_BOOTSTRAP':'token-secret',
              'TELEGRAM_BOT_TOKEN':'telegram','OPENROUTER_API_KEY':'model','MANIFEST_HMAC_KEY':'sign'}
         self.assertEqual(W.bird_env(env), {'PATH':'bin','AUTH_TOKEN':'x-secret','CT0':'csrf-secret'})
-        self.assertFalse(any(k.startswith('X_BIRD_') for k in W.jesse_env(env)))
+        self.assertFalse(any(k.startswith(('X_BIRD_', 'X_OAUTH_')) for k in W.jesse_env(env)))
+        self.assertNotIn('X_BOOKMARK_OAUTH_BOOTSTRAP', W.jesse_env(env))
         with self.assertRaises(ValueError): W.bird_env({})
 
     def test_signature_failure_prevents_bird_and_preserves_deadline(self):

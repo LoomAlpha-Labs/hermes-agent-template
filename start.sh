@@ -60,13 +60,14 @@ rm -f /data/.hermes/gateway.pid
 if [ "${JEV_LIVE_ENABLED:-0}" = "1" ]; then
   (
     while true; do
-      python /app/jev_worker.py || echo 'JEV worker stopped; restarting in 30s' >&2
+      env -u X_OAUTH_CLIENT_ID -u X_OAUTH_CLIENT_SECRET -u X_OAUTH_REDIRECT_URI \
+        -u X_OAUTH_TOKEN_FILE -u X_BOOKMARK_OAUTH_BOOTSTRAP python /app/jev_worker.py || echo 'JEV worker stopped; restarting in 30s' >&2
       sleep 30
     done
   ) &
 fi
 
-# Owner-requested hourly bookmarks. Credentials are used only by the fixed Bird
+# Owner-requested hourly bookmarks. Credentials are used only by the fixed OAuth
 # child; Jesse's cron precheck receives a private data snapshot without secrets.
 if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
   (
@@ -77,9 +78,11 @@ if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
   ) &
 fi
 
-# Only the already-forked fixed Bird worker needs the X session. Unknown custom
+# Only the already-forked fixed bookmark worker needs X authorization. Unknown custom
 # variables are not necessarily removed by Hermes's generic terminal filter.
 # Remove them before the admin server/gateway/agent tree starts.
 unset X_BIRD_AUTH_TOKEN X_BIRD_CT0 AUTH_TOKEN CT0
+unset X_OAUTH_CLIENT_ID X_OAUTH_CLIENT_SECRET X_OAUTH_REDIRECT_URI X_OAUTH_TOKEN_FILE
+unset X_BOOKMARK_OAUTH_BOOTSTRAP
 
 exec python /app/server.py
