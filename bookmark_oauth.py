@@ -52,9 +52,14 @@ def reserve(path, cap, cost, month=None):
         db.commit()
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch(url, headers):
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+        with urllib.request.build_opener(NoRedirect()).open(urllib.request.Request(url, headers=headers), timeout=30) as response:
             return json.load(response)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         raise CollectionError('Official bookmark request failed; reservation retained') from None

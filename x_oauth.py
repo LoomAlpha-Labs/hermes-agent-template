@@ -57,6 +57,11 @@ def _safe_oauth_detail(payload: object) -> str:
     return text
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _default_token_transport(
     url: str,
     data: dict[str, str],
@@ -69,7 +74,7 @@ def _default_token_transport(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         try:

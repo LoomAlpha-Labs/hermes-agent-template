@@ -110,6 +110,20 @@ class OAuthCollectorTests(unittest.TestCase):
                 with closing(sqlite3.connect(state/'budget.sqlite3')) as db:
                     self.assertEqual(db.execute('SELECT SUM(amount) FROM reservations').fetchone()[0],10_000)
 
+    def test_existing_token_extra_scopes_and_wrong_client_fail_before_paid_read(self):
+        for changes in ({'scope':TOKEN['scope'] + ' tweet.write'}, {'client_id':'other'}, {'user_id':'999'}):
+            with tempfile.TemporaryDirectory() as td:
+                state=Path(td); TokenStore(state/'tokens.json').save(dict(TOKEN,**changes))
+                env={'X_BOOKMARK_PROVIDER':'oauth','X_BOOKMARK_USER_ID':'123','X_OAUTH_CLIENT_ID':'test-client'}
+                with patch.object(B,'reserve') as reserve, patch.object(B,'fetch') as fetch:
+                    with self.assertRaises(B.CollectionError): B.collect(env,state,fetch)
+                    reserve.assert_not_called(); fetch.assert_not_called()
+
+    def test_authorization_redirects_refused(self):
+        import x_oauth
+        for handler in (B.NoRedirect(),x_oauth.NoRedirect()):
+            self.assertIsNone(handler.redirect_request(None,None,302,'',{},'https://other.test'))
+
     def test_existing_rotated_token_ignores_bootstrap(self):
         with tempfile.TemporaryDirectory() as td:
             state=Path(td); TokenStore(state/'tokens.json').save(TOKEN)
