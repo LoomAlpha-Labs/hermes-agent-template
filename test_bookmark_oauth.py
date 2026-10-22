@@ -124,6 +124,44 @@ class OAuthCollectorTests(unittest.TestCase):
         for handler in (B.NoRedirect(),x_oauth.NoRedirect()):
             self.assertIsNone(handler.redirect_request(None,None,302,'',{},'https://other.test'))
 
+    def test_month_boundary_bookmark_and_author_each_reserve_both_months(self):
+        from datetime import datetime, timezone
+        end = datetime(2026,12,31,23,59,30,tzinfo=timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)
+            env={'X_BOOKMARK_PROVIDER':'oauth','X_BOOKMARK_USER_ID':'123','X_OAUTH_CLIENT_ID':'test-client',
+                 'X_BOOKMARK_OAUTH_BOOTSTRAP':json.dumps(TOKEN),'X_BOOKMARK_POST_READ_USD':'0.001',
+                 'X_BOOKMARK_OWNED_READS_VERIFIED':'1'}
+            B.collect(env,state,lambda url,h: {'data':PAYLOAD['data']} if '/bookmarks?' in url else {'data':PAYLOAD['includes']['users']},clock=lambda:end)
+            with closing(sqlite3.connect(state/'budget.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT month,SUM(amount) FROM reservations GROUP BY month ORDER BY month').fetchall(),
+                                 [('2026-12',110_000),('2027-01',110_000)])
+
+    def test_month_boundary_second_month_cap_rolls_back_both_reservations(self):
+        from datetime import datetime, timezone
+        end = datetime(2026,10,31,23,59,59,tzinfo=timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'budget.sqlite3'
+            B.reserve(path,5_000_000,5_000_000,month='2026-11')
+            with self.assertRaises(B.CollectionError): B.reserve(path,5_000_000,100_000,clock=lambda:end)
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(db.execute('SELECT month,SUM(amount) FROM reservations GROUP BY month').fetchall(), [('2026-11',5_000_000)])
+
+    def test_author_lookup_after_midnight_charges_new_month(self):
+        from datetime import datetime, timezone
+        before=datetime(2026,10,31,23,59,59,tzinfo=timezone.utc).timestamp()
+        after=before+2
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)
+            env={'X_BOOKMARK_PROVIDER':'oauth','X_BOOKMARK_USER_ID':'123','X_OAUTH_CLIENT_ID':'test-client',
+                 'X_BOOKMARK_OAUTH_BOOTSTRAP':json.dumps(TOKEN),'X_BOOKMARK_POST_READ_USD':'0.001',
+                 'X_BOOKMARK_OWNED_READS_VERIFIED':'1'}
+            ticks=iter([before,after])
+            B.collect(env,state,lambda url,h: {'data':PAYLOAD['data']} if '/bookmarks?' in url else {'data':PAYLOAD['includes']['users']},clock=lambda:next(ticks))
+            with closing(sqlite3.connect(state/'budget.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT month,SUM(amount) FROM reservations GROUP BY month ORDER BY month').fetchall(),
+                                 [('2026-10',100_000),('2026-11',110_000)])
+
     def test_existing_rotated_token_ignores_bootstrap(self):
         with tempfile.TemporaryDirectory() as td:
             state=Path(td); TokenStore(state/'tokens.json').save(TOKEN)

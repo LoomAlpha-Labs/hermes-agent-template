@@ -12,7 +12,10 @@ The approved additional bookmark allowance is at most $5 per UTC calendar month,
 existing credits only, no auto-topups. This code does not buy credits or change
 provider billing settings. The local SQLite ledger pessimistically reserves the
 entire request cost before sending it and keeps reservations after all errors,
-including crashes. It does not trust provider daily deduplication or release
+including crashes. In the final120 seconds of a UTC month, each request is
+reserved against both that month and the following month atomically, protecting
+against requests crossing the billing boundary. Neither reservation is refunded.
+It does not trust provider daily deduplication or release
 unused reservation based on incomplete response billing information.
 
 A full bookmark request reserves 100 post resources, even when fewer return.
@@ -54,7 +57,9 @@ Railway variables for the fixed worker:
 
 - `X_BOOKMARK_PROVIDER=oauth` (opt-in; absence blocks collection)
 - `X_BOOKMARK_USER_ID`: verified consenting owner numeric ID
-- `X_OAUTH_CLIENT_ID`, `X_OAUTH_CLIENT_SECRET`: regenerated app credentials
+- `X_OAUTH_CLIENT_ID`: authorized app client ID
+- `X_OAUTH_CLIENT_SECRET`: optional; omit for the public client used in the
+  successful authorization flow. Confidential clients require their secret.
 - `X_BOOKMARK_OAUTH_BOOTSTRAP`: private JSON token record with `user_id`,
   `client_id`, `access_token`, `refresh_token`, `scope`, `expires_at` (Unix seconds)
 - `X_BOOKMARK_MONTHLY_BUDGET_USD=5` (values above5 rejected)

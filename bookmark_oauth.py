@@ -1,5 +1,5 @@
 """Opt-in official bookmark reader. No cookies, unmetered retries or fallbacks."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 import fcntl
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,19 +37,30 @@ def pricing(env):
     return int(cap * 1_000_000), int(rate * 1_000_000)
 
 
-def reserve(path, cap, cost, month=None):
+def reserve(path, cap, cost, month=None, clock=time.time):
     """Durable pessimistic charge; never refund errors or assume provider dedup."""
-    month = month or datetime.now(timezone.utc).strftime('%Y-%m')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with closing(sqlite3.connect(path, timeout=30)) as db:
         os.chmod(path, 0o600)
         db.execute('PRAGMA synchronous=FULL')
         db.execute('CREATE TABLE IF NOT EXISTS reservations (month TEXT, amount INTEGER NOT NULL CHECK(amount > 0))')
         db.execute('BEGIN IMMEDIATE')
-        spent = db.execute('SELECT COALESCE(SUM(amount),0) FROM reservations WHERE month=?', (month,)).fetchone()[0]
-        if not isinstance(cost, int) or cost <= 0 or not 0 < cap <= 5_000_000 or spent + cost > cap:
+        # Determine the billing window AFTER obtaining the write lock. Requests
+        # starting in the final120s may bill in either month: reserve both, in
+        # one transaction, and never refund either conservative reservation.
+        now = datetime.fromtimestamp(clock(), timezone.utc)
+        next_month = (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                      + timedelta(days=32)).replace(day=1)
+        months = [month or now.strftime('%Y-%m')]
+        if month is None and (next_month - now).total_seconds() <= 120:
+            months.append(next_month.strftime('%Y-%m'))
+        if not isinstance(cost, int) or cost <= 0 or not 0 < cap <= 5_000_000:
             raise CollectionError('Monthly bookmark reservation cap reached; collection paused')
-        db.execute('INSERT INTO reservations VALUES (?,?)', (month, cost))
+        for billing_month in months:
+            spent = db.execute('SELECT COALESCE(SUM(amount),0) FROM reservations WHERE month=?', (billing_month,)).fetchone()[0]
+            if spent + cost > cap:
+                raise CollectionError('Monthly bookmark reservation cap reached; collection paused')
+        db.executemany('INSERT INTO reservations VALUES (?,?)', [(m, cost) for m in months])
         db.commit()
 
 
@@ -70,7 +82,7 @@ def validate_user(user):
         raise CollectionError('Malformed bookmark author')
 
 
-def authors(payload, state_dir, cap, transport, headers):
+def authors(payload, state_dir, cap, transport, headers, clock=time.time):
     """Durably cache actual author identities; no invented handles or free retries."""
     if not isinstance(payload, dict) or payload.get('errors'):
         raise CollectionError('Incomplete official bookmark response')
@@ -94,7 +106,7 @@ def authors(payload, state_dir, cap, transport, headers):
         raise CollectionError('Invalid author cache; collection paused') from None
     missing = sorted(wanted - set(cache))
     if missing:
-        reserve(state_dir / 'budget.sqlite3', cap, len(missing) * 10_000)
+        reserve(state_dir / 'budget.sqlite3', cap, len(missing) * 10_000, clock=clock)
         query = urllib.parse.urlencode({'ids': ','.join(missing), 'user.fields': 'id,name,username'})
         response = transport('https://api.x.com/2/users?' + query, headers)
         if not isinstance(response, dict) or response.get('errors') or not isinstance(response.get('data'), list):
@@ -155,7 +167,7 @@ def normalize(payload, cached_users=None):
     return posts
 
 
-def collect(env=None, state_dir=STATE, transport=fetch, session_factory=XOAuthSession):
+def collect(env=None, state_dir=STATE, transport=fetch, session_factory=XOAuthSession, clock=time.time):
     env = os.environ if env is None else env
     if env.get('X_BOOKMARK_PROVIDER') != 'oauth':
         raise CollectionError('Official bookmark reader is not enabled')
@@ -189,10 +201,10 @@ def collect(env=None, state_dir=STATE, transport=fetch, session_factory=XOAuthSe
         except (XOAuthError, ValueError, TypeError, OverflowError):
             raise CollectionError('OAuth authorization unavailable; reauthorization may be required') from None
         # Never assume provider duplicate-read discounts.
-        reserve(state_dir / 'budget.sqlite3', cap, 100 * rate)
+        reserve(state_dir / 'budget.sqlite3', cap, 100 * rate, clock=clock)
         query = urllib.parse.urlencode({'max_results': 100,
                                       'tweet.fields': 'id,text,created_at,author_id,note_tweet'})
         headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
         payload = transport(f'https://api.x.com/2/users/{user_id}/bookmarks?{query}', headers)
-        cache = authors(payload, state_dir, cap, transport, headers)
+        cache = authors(payload, state_dir, cap, transport, headers, clock=clock)
         return normalize(payload, cache)
