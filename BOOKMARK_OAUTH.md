@@ -6,7 +6,7 @@ format, overlap checks and checkpoint/delivery logic are unchanged. A missing
 OAuth configuration or failed/partial response produces a failed snapshot;
 it never falls back to cookies, skips a gap, or treats failure as no new posts.
 
-## Economics and activation decision
+## Approved economics and activation
 
 The approved additional bookmark allowance is at most $5 per UTC calendar month,
 existing credits only, no auto-topups. This code does not buy credits or change
@@ -25,15 +25,18 @@ successful lookup and can become stale if users rename themselves.
 At verified owned-read post pricing of $0.001 a bookmark call reserves $0.10.
 100 initially unknown authors cost at most $1 extra; each additional previously
 unknown author costs $0.01. With $5, 40 hourly full-window calls fit after that
-initial author enrichment. This does NOT sustain hourly operation for a month.
+initial author enrichment. This does NOT sustain hourly operation for a month. The owner explicitly chose
+"Keep hourly; stop when $5 is reached." Preserve the hourly schedule and let the
+budget stop collection; do not shrink the100-post window or switch to daily.
 Daily 100-post reads over31 days plus100 initially unknown authors would reserve
 $4.10, excluding further new authors and commissioning costs. A daily schedule
 has NOT been implemented or authorized here: the existing wiki snapshot gate
 rejects snapshots older than3900s and would need a compatible policy first.
 
 At standard $0.005/post each bookmark call reserves $0.50. Reservations are
-upper bounds, not measured provider charges. Do not enable until the owner has
-resolved economics/cadence. No schedule change is included.
+upper bounds, not measured provider charges. Cadence and cap are now approved;
+private provisioning, price verification and live commissioning remain required.
+No schedule change is included.
 
 Provider prices must be reverified before activation. This reservation policy
 cannot protect against unannounced provider pricing changes, other applications,
