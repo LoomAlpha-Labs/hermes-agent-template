@@ -167,7 +167,7 @@ COPY server.py /app/server.py
 COPY runtime_readiness.py /app/runtime_readiness.py
 COPY scripts/request_redeploy.py /app/scripts/request_redeploy.py
 COPY jev_worker.py /app/jev_worker.py
-COPY bookmark_worker.py /app/bookmark_worker.py
+COPY bookmark_worker.py bookmark_oauth.py x_oauth.py /app/
 RUN npm install --global --ignore-scripts @steipete/bird@0.8.0 && bird --version
 COPY templates/ /app/templates/
 COPY start.sh /app/start.sh

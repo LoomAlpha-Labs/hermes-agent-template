@@ -1,4 +1,4 @@
-"""Hourly owner-authorized Bird worker; Jesse receives data, never X credentials."""
+"""Hourly owner-authorized bookmark worker; Jesse receives data, never X credentials."""
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -44,11 +44,12 @@ def bird_env(environ):
 
 def jesse_env(environ):
     return {k: v for k, v in environ.items()
-            if k not in ('AUTH_TOKEN', 'CT0') and not k.startswith('X_BIRD_')}
+            if k not in ('AUTH_TOKEN', 'CT0', 'X_BOOKMARK_OAUTH_BOOTSTRAP')
+            and not k.startswith(('X_BIRD_', 'X_OAUTH_'))}
 
 
 def _git(root, *args):
-    return subprocess.run(['git', *args], cwd=root, capture_output=True, timeout=30)
+    return subprocess.run(['git', *args], cwd=root, env=jesse_env(os.environ), capture_output=True, timeout=30)
 
 
 def _json_candidate(payload, timestamp_fields):
@@ -132,7 +133,7 @@ def sync_repository(root=ROOT, live=LIVE, environ=None):
 
 def verify_runtime():
     result = subprocess.run([sys.executable, str(LIVE / 'manifest_tool.py'),
-        'verify', '--dir', str(ROOT / 'agent/scripts')], capture_output=True, timeout=30)
+        'verify', '--dir', str(ROOT / 'agent/scripts')], env=jesse_env(os.environ), capture_output=True, timeout=30)
     if result.returncode:
         raise ValueError('Signed runtime verification failed')
     approved = set(result.stdout.decode().splitlines())
@@ -184,7 +185,7 @@ def acknowledge(job_id, started, state_dir=STATE):
         if not path.exists():
             raise ValueError('Review did not finish its batch; keep pending')
         result = subprocess.run(['git', 'show', 'origin/main:' + path.relative_to(ROOT).as_posix()],
-            cwd=ROOT, capture_output=True, timeout=20)
+            cwd=ROOT, env=jesse_env(os.environ), capture_output=True, timeout=20)
         if result.returncode or result.stdout != path.read_bytes():
             raise ValueError('Completion receipt is not published; keep pending')
     done['receipts'] = sorted(set(done['receipts']) | set(targets))
@@ -209,17 +210,13 @@ def cycle(state, status_path, job_id, clock=time.time):
         snapshot = {'collected_at_utc': datetime.now(timezone.utc).isoformat(),
                     'sync_ok': sync.returncode == 0, 'status': 'failed'}
         try:
-            bird = subprocess.run(['bird', 'bookmarks', '--count', '100', '--json', '--plain'],
-                env=bird_env(os.environ), capture_output=True, timeout=90)
-            if bird.returncode:
-                raise ValueError('Bookmark read failed')
-            posts = json.loads(bird.stdout)
-            if not isinstance(posts, list) or not 1 <= len(posts) <= 100:
-                raise ValueError('Invalid bookmark response')
+            from bookmark_oauth import collect
+            posts = collect()
             snapshot.update(status='ok', posts=posts)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             # Never save/log raw stderr, response fragments or credentials.
             snapshot['status'] = 'failed'
+            snapshot['reason'] = 'Official bookmark collection unavailable; inspect authorization or budget'
         atomic(status_path.parent / 'snapshot.json', snapshot)
         state.update(status='waiting',
                      collection_status=snapshot['status'], sync_ok=snapshot['sync_ok'])
