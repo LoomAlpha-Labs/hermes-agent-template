@@ -224,3 +224,13 @@ existing atomic-claim path. Routing, credentials, models and schedules are uncha
 The image build reproduces the regressions on the base and runs the recovery and
 existing Telegram suites after applying the patch. Recheck/remove the backport
 when upgrading upstream; patch application fails closed on conflicting changes.
+
+### Browser security boundary
+
+The wrapper rejects foreign browser origins before authenticated management,
+proxy, login, and WebSocket operations. On Railway it uses the generated
+`RAILWAY_PUBLIC_DOMAIN`; for an explicitly configured custom domain set
+`HERMES_PUBLIC_ORIGIN` to that exact HTTPS origin. CLI clients without browser
+origin headers remain supported. HTTPS/Railway login cookies use `Secure`.
+Missing `ADMIN_PASSWORD` never prints the generated inaccessible password; set
+the service variable through the private Railway UI to enable sign-in.

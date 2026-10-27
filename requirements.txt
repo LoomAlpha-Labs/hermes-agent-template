@@ -10,3 +10,6 @@ websockets>=12.0
 
 # Added 2026-06-11: wiki scripts (strc-monitor, hype-etf-monitor) parse HTML/JS
 beautifulsoup4>=4.12.0
+
+# Exclude compromised emSign roots (GHSA-6q48-6c7w-9gw2).
+certifi>=2026.10.19

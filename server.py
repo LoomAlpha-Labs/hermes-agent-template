@@ -96,7 +96,7 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 if not ADMIN_PASSWORD:
     ADMIN_PASSWORD = secrets.token_urlsafe(16)
-    print(f"[server] Admin credentials — username: {ADMIN_USERNAME}  password: {ADMIN_PASSWORD}", flush=True)
+    print("[server] ADMIN_PASSWORD missing: generated an inaccessible temporary password; configure the service variable to sign in", flush=True)
 else:
     print(f"[server] Admin username: {ADMIN_USERNAME}", flush=True)
 
@@ -647,13 +647,26 @@ def _is_authenticated(request: Request) -> bool:
 
 def _safe_return_to(value: str) -> str:
     """Reject open-redirect attempts — only allow same-origin relative paths."""
-    if not value or not value.startswith("/") or value.startswith("//"):
+    if (not value or not value.startswith("/") or value.startswith("//")
+            or "\\" in value or any(ord(c) < 32 or ord(c) == 127 for c in value)):
         return "/"
     # Strip any scheme/netloc that slipped through.
     p = _urlparse(value)
     if p.scheme or p.netloc:
         return "/"
     return value
+
+
+def _trusted_browser_origin(request) -> bool:
+    """Cookies authenticate the user; an exact origin binds browser requests."""
+    origin = request.headers.get("origin")
+    expected = os.environ.get("HERMES_PUBLIC_ORIGIN", "").rstrip("/")
+    if not expected:
+        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+        expected = f"https://{domain}" if domain else str(request.base_url).rstrip("/").replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+    if origin and origin != expected:
+        return False
+    return request.headers.get("sec-fetch-site") != "cross-site"
 
 
 def guard(request: Request) -> Response | None:
@@ -663,6 +676,8 @@ def guard(request: Request) -> Response | None:
     - API / XHR: 401 JSON (so the SPA's fetch() can surface it cleanly)
     """
     if _is_authenticated(request):
+        if not _trusted_browser_origin(request):
+            return JSONResponse({"error": "Forbidden origin"}, status_code=403)
         return None
     accept = request.headers.get("accept", "").lower()
     wants_html = "text/html" in accept
@@ -745,6 +760,8 @@ async def page_login(request: Request) -> Response:
 
 async def login_post(request: Request) -> Response:
     """POST /login — validate creds and set the auth cookie."""
+    if not _trusted_browser_origin(request):
+        return JSONResponse({"error": "Forbidden origin"}, status_code=403)
     form = await request.form()
     username = str(form.get("username", ""))
     password = str(form.get("password", ""))
@@ -759,6 +776,7 @@ async def login_post(request: Request) -> Response:
             _make_auth_token(),
             max_age=COOKIE_MAX_AGE,
             httponly=True,
+            secure=(request.url.scheme == "https" or bool(os.environ.get("RAILWAY_ENVIRONMENT_ID"))),
             samesite="lax",
             path="/",
         )
@@ -1207,6 +1225,8 @@ async def api_pairing_approve(request: Request):
     platform, code = body.get("platform",""), body.get("code","").strip()
     if not platform or not code:
         return JSONResponse({"error": "platform and code required"}, status_code=400)
+    if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
+        return JSONResponse({"error": "Invalid platform"}, status_code=400)
     pending_path = PAIRING_DIR / f"{platform}-pending.json"
     pending = _pjson(pending_path)
     if code not in pending:
@@ -1229,6 +1249,8 @@ async def api_pairing_deny(request: Request):
     try: body = await request.json()
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     platform, code = body.get("platform",""), body.get("code","").strip()
+    if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
+        return JSONResponse({"error": "Invalid platform"}, status_code=400)
     p = PAIRING_DIR / f"{platform}-pending.json"
     pending = _pjson(p)
     if code in pending:
@@ -1254,6 +1276,8 @@ async def api_pairing_revoke(request: Request):
     platform, uid = body.get("platform",""), body.get("user_id","")
     if not platform or not uid:
         return JSONResponse({"error": "platform and user_id required"}, status_code=400)
+    if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
+        return JSONResponse({"error": "Invalid platform"}, status_code=400)
     p = PAIRING_DIR / f"{platform}-approved.json"
     approved = _pjson(p)
     if uid in approved:
@@ -1688,6 +1712,10 @@ async def ws_proxy(websocket: WebSocket) -> None:
         # Close before accept — browser sees the handshake fail (expected
         # for unauthenticated calls).
         await websocket.close(code=4401)
+        return
+
+    if not _trusted_browser_origin(websocket):
+        await websocket.close(code=4403)
         return
 
     # 2. Build upstream URL preserving the SPA's path + query (the query
