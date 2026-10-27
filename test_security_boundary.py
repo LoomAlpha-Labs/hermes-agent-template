@@ -41,3 +41,9 @@ class BrowserBoundaryTests(unittest.TestCase):
                 with self.client.websocket_connect('/api/pty',headers={**self.cookie,'Origin':'https://evil.example'}):
                     pass
             connect.assert_not_called()
+
+    def test_pairing_rejects_malformed_json_shapes(self):
+        for endpoint in ['approve', 'deny', 'revoke']:
+            for body in [[], {'platform':'telegram', 'code':123, 'user_id':[]}]:
+                response = self.client.post('/setup/api/pairing/'+endpoint, json=body, headers=self.cookie)
+                self.assertEqual(response.status_code,400)

@@ -1222,7 +1222,9 @@ async def api_pairing_approve(request: Request):
     if err := guard(request): return err
     try: body = await request.json()
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    platform, code = body.get("platform",""), body.get("code","").strip()
+    if not isinstance(body, dict) or not isinstance(body.get("code", ""), str):
+        return JSONResponse({"error": "Invalid pairing request"}, status_code=400)
+    platform, code = body.get("platform", ""), body.get("code", "").strip()
     if not platform or not code:
         return JSONResponse({"error": "platform and code required"}, status_code=400)
     if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
@@ -1248,7 +1250,9 @@ async def api_pairing_deny(request: Request):
     if err := guard(request): return err
     try: body = await request.json()
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    platform, code = body.get("platform",""), body.get("code","").strip()
+    if not isinstance(body, dict) or not isinstance(body.get("code", ""), str):
+        return JSONResponse({"error": "Invalid pairing request"}, status_code=400)
+    platform, code = body.get("platform", ""), body.get("code", "").strip()
     if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
         return JSONResponse({"error": "Invalid platform"}, status_code=400)
     p = PAIRING_DIR / f"{platform}-pending.json"
@@ -1273,7 +1277,9 @@ async def api_pairing_revoke(request: Request):
     if err := guard(request): return err
     try: body = await request.json()
     except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    platform, uid = body.get("platform",""), body.get("user_id","")
+    if not isinstance(body, dict) or not isinstance(body.get("user_id", ""), str):
+        return JSONResponse({"error": "Invalid pairing request"}, status_code=400)
+    platform, uid = body.get("platform", ""), body.get("user_id", "")
     if not platform or not uid:
         return JSONResponse({"error": "platform and user_id required"}, status_code=400)
     if not isinstance(platform, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", platform):
