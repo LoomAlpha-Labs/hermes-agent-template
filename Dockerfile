@@ -156,6 +156,13 @@ RUN uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt
     rm /tmp/hermes-requirements.txt && \
     python -c "import io,wave; from faster_whisper.audio import decode_audio; import ctranslate2,yt_dlp; b=io.BytesIO(); w=wave.open(b,'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(32000)); w.close(); b.seek(0); assert len(decode_audio(b,sampling_rate=16000))==16000; assert 'int8' in ctranslate2.get_supported_compute_types('cpu'); print('Media decode and CPU int8 passed')"
 
+# Bake the exact core lockfile's helpers into the stamped image store.
+# No first-request downloads or mutable runtime installation are needed.
+COPY scripts/stage_hermes_helper_tools.py /usr/local/libexec/hermes/stage-helper-tools.py
+COPY scripts/verify_hermes_helper_tools.py /usr/local/libexec/hermes/verify-helper-tools.py
+RUN python /usr/local/libexec/hermes/stage-helper-tools.py && \
+    /opt/hermes-agent/.venv/bin/python /usr/local/libexec/hermes/verify-helper-tools.py
+
 # Installing an enabled plugin can select a new application environment.
 # Exercise the real transaction in a disposable home and fail if that selected
 # environment loses any template-specific packages or media capabilities.
@@ -220,6 +227,8 @@ RUN env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp \
         --expected-library-prefix /opt/sqlite/lib && \
     cd /app && ADMIN_PASSWORD=acceptance-test-only /opt/hermes-agent/.venv/bin/python \
       -c "import server, uvicorn, run_agent, gateway.run, cron.scheduler; print('Packaged service imports passed')"
+# Recheck native helper dispatch after the final application dependencies.
+RUN /opt/hermes-agent/.venv/bin/python /usr/local/libexec/hermes/verify-helper-tools.py
 ENV HOME=/data
 ENV HERMES_HOME=/data/.hermes
 
