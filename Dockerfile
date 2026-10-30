@@ -50,8 +50,8 @@ RUN printf '%s\n' /opt/sqlite/lib > /etc/ld.so.conf.d/hermes-sqlite.conf && \
 # newest tag (format `vYYYY.M.D`, optionally with a `.PATCH` suffix, e.g.
 # `v2026.5.29.2`) and update the default below. Use `main` only if you accept
 # that every rebuild can pull arbitrary new upstream commits.
-ARG HERMES_REF=v0.21.6
-ARG HERMES_COMMIT=818c13be1dc4fd28987e1e881a9408224afd4535
+ARG HERMES_REF=v0.22.5
+ARG HERMES_COMMIT=bf0203a794a07aac3ff764972ab9087baa4e4f4e
 
 # tini = tiny init that we run as PID 1. Without it, hermes's grandchild
 # processes (MCP stdio servers, git, bun, browser daemons spawned by tools)
@@ -93,7 +93,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt honcho-ai==2.2.0 hindsight-client==0.6.1 && \
     uv pip install --system --no-cache --no-deps -e . && \
     python scripts/write_install_stamp.py --output install-stamp.json \
-      --commit "${HERMES_COMMIT}" --base-version 0.21.6 --distance 0 \
+      --commit "${HERMES_COMMIT}" --base-version 0.22.5 --distance 0 \
       --source ci --distribution docker --update-mechanism external && \
     python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
     uv venv --python /usr/local/bin/python --system-site-packages /tmp/hermes-check && \
@@ -106,7 +106,12 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
       tests/cron/test_cron_script.py \
       tests/hermes_state/test_shared_session_db_registry.py \
       tests/hermes_state/test_dedupe_migration_contention.py \
-      tests/gateway/test_session_db_handle_sharing.py && \
+      tests/gateway/test_session_db_handle_sharing.py \
+      tests/hermes_state/test_runtime_schema.py \
+      tests/hermes_cli/test_browse_schema_drift.py \
+      tests/tools/test_delegation_backends.py \
+      tests/tools/test_delegation_route_fields.py \
+      tests/hermes_cli/test_plugin_host_delegation.py && \
     rm -rf /tmp/hermes-check && \
     python scripts/generate_icons.py --source /opt/hermes-agent --out /tmp/hermes-icons && \
     node scripts/build/node-deps.mjs --source /opt/hermes-agent --workspace ui-tui --workspace web && \
@@ -117,7 +122,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     cp -a /tmp/hermes-web/. /opt/hermes-agent/hermes_cli/web_dist/ && \
     rm -rf /tmp/hermes-icons /tmp/hermes-tui /tmp/hermes-web /opt/hermes-agent/.git /root/.npm
 ENV HERMES_WEB_DIST=/opt/hermes-agent/hermes_cli/web_dist
-RUN python -c "from pathlib import Path; from hermes_cli.version_info import get_version_info; from hermes_state_common import SCHEMA_VERSION; v=get_version_info(); assert v.base_version=='0.21.6' and v.commit=='818c13be1dc4fd28987e1e881a9408224afd4535' and SCHEMA_VERSION==31; assert Path('/opt/hermes-agent/ui-tui/dist/entry.js').is_file(); assert Path('/opt/hermes-agent/hermes_cli/web_dist/index.html').is_file(); print('Exact 0.21.6 identity, schema31 and frontend products passed')"
+RUN python -c "from pathlib import Path; from hermes_cli.version_info import get_version_info; from hermes_state_common import SCHEMA_VERSION; v=get_version_info(); assert v.base_version=='0.22.5' and v.commit=='bf0203a794a07aac3ff764972ab9087baa4e4f4e' and SCHEMA_VERSION==32; assert Path('/opt/hermes-agent/ui-tui/dist/entry.js').is_file(); assert Path('/opt/hermes-agent/hermes_cli/web_dist/index.html').is_file(); print('Exact 0.22.5 identity, schema32 and frontend products passed')"
 
 # Why pre-build ui-tui (and why we don't delete it after):
 # - The dashboard's embedded Chat tab spawns `node ui-tui/dist/entry.js`
