@@ -70,6 +70,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+COPY scripts/stage_hermes_pm_runtime.py /tmp/stage-hermes-pm-runtime.py
+
 # Install hermes-agent (provides the `hermes` CLI) and pre-build its React
 # dashboard so `hermes dashboard` has nothing to build at runtime.
 #
@@ -95,6 +97,14 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     python scripts/write_install_stamp.py --output install-stamp.json \
       --commit "${HERMES_COMMIT}" --base-version 0.22.5 --distance 0 \
       --source ci --distribution docker --update-mechanism external && \
+    python /tmp/stage-hermes-pm-runtime.py && \
+    python -m pm.build_env --source /opt/hermes-agent --python /usr/local/bin/python \
+      --out /opt/hermes-agent/.venv --no-install-project --sealed --record-selection \
+      --extra all --extra messaging --extra tts-premium --extra bedrock \
+      --extra anthropic --extra edge-tts --extra vision && \
+    uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache \
+      --constraint /tmp/hermes-requirements.txt honcho-ai==2.2.0 hindsight-client==0.6.1 && \
+    uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache --no-deps -e . && \
     python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
     uv venv --python /usr/local/bin/python --system-site-packages /tmp/hermes-check && \
     uv pip install --python /tmp/hermes-check/bin/python pytest==9.1.1 pytest-asyncio==1.3.0 && \
@@ -111,7 +121,9 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
       tests/hermes_cli/test_browse_schema_drift.py \
       tests/tools/test_delegation_backends.py \
       tests/tools/test_delegation_route_fields.py \
-      tests/hermes_cli/test_plugin_host_delegation.py && \
+      tests/hermes_cli/test_plugin_host_delegation.py \
+      tests/pm/test_runtime_entrypoints.py \
+      tests/pm/test_runtime.py && \
     rm -rf /tmp/hermes-check && \
     python scripts/generate_icons.py --source /opt/hermes-agent --out /tmp/hermes-icons && \
     node scripts/build/node-deps.mjs --source /opt/hermes-agent --workspace ui-tui --workspace web && \
@@ -140,8 +152,23 @@ RUN python -c "from pathlib import Path; from hermes_cli.version_info import get
 # The model/cache stays on the persistent volume; no model download during build.
 COPY media-requirements.txt /app/media-requirements.txt
 RUN uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt -r /app/media-requirements.txt && \
+    uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache --constraint /tmp/hermes-requirements.txt -r /app/media-requirements.txt && \
     rm /tmp/hermes-requirements.txt && \
     python -c "import io,wave; from faster_whisper.audio import decode_audio; import ctranslate2,yt_dlp; b=io.BytesIO(); w=wave.open(b,'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(32000)); w.close(); b.seek(0); assert len(decode_audio(b,sampling_rate=16000))==16000; assert 'int8' in ctranslate2.get_supported_compute_types('cpu'); print('Media decode and CPU int8 passed')"
+
+# Installing an enabled plugin can select a new application environment.
+# Exercise the real transaction in a disposable home and fail if that selected
+# environment loses any template-specific packages or media capabilities.
+COPY scripts/verify_hermes_plugin_environment.py /tmp/verify-hermes-plugin-environment.py
+RUN mkdir -p /tmp/hermes-plugin-check && \
+    env HOME=/tmp/hermes-plugin-check HERMES_HOME=/tmp/hermes-plugin-check/.hermes \
+      hermes plugins install 'NousResearch/hermes-official-plugins#advanced-delegation' \
+        --ref b3825d097195b5748585b0491fab48c95d105c19 --enable --yes-deps && \
+    env HOME=/tmp/hermes-plugin-check HERMES_HOME=/tmp/hermes-plugin-check/.hermes \
+      python -c "from hermes_cli.plugins_cmd_git import pinned_revision; from hermes_cli.plugins import discover_plugins; from agent.delegation_registry import get_provider; assert pinned_revision('advanced-delegation') == 'b3825d097195b5748585b0491fab48c95d105c19'; discover_plugins(); assert get_provider('model_map') is not None; print('Pinned plugin manager install and discovery passed')" && \
+    env HOME=/tmp/hermes-plugin-check HERMES_HOME=/tmp/hermes-plugin-check/.hermes \
+      python /tmp/verify-hermes-plugin-environment.py && \
+    rm -rf /tmp/hermes-plugin-check
 
 # Narrow backport on the pinned upstream runtime; fail closed if it no longer applies.
 COPY patches/ /tmp/telegram-recovery/
@@ -164,7 +191,8 @@ RUN cd /opt/hermes-agent && \
     rm -rf /tmp/telegram-check /tmp/telegram-recovery
 
 COPY requirements.txt /app/requirements.txt
-RUN uv pip install --system --no-cache -r /app/requirements.txt
+RUN uv pip install --system --no-cache -r /app/requirements.txt && \
+    uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache -r /app/requirements.txt
 
 RUN mkdir -p /data/.hermes
 
@@ -184,7 +212,14 @@ RUN env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp \
       /usr/local/bin/python /usr/local/libexec/hermes/verify-sqlite-runtime.py \
         --expected-version "${SQLITE_VERSION}" \
         --expected-source-id "${SQLITE_SOURCE_ID}" \
-        --expected-library-prefix /opt/sqlite/lib
+        --expected-library-prefix /opt/sqlite/lib && \
+    env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp \
+      /opt/hermes-agent/.venv/bin/python /usr/local/libexec/hermes/verify-sqlite-runtime.py \
+        --expected-version "${SQLITE_VERSION}" \
+        --expected-source-id "${SQLITE_SOURCE_ID}" \
+        --expected-library-prefix /opt/sqlite/lib && \
+    cd /app && ADMIN_PASSWORD=acceptance-test-only /opt/hermes-agent/.venv/bin/python \
+      -c "import server, uvicorn, run_agent, gateway.run, cron.scheduler; print('Packaged service imports passed')"
 ENV HOME=/data
 ENV HERMES_HOME=/data/.hermes
 
