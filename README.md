@@ -201,6 +201,10 @@ bookmarks using the service's `X_BIRD_AUTH_TOKEN` and `X_BIRD_CT0`; it has no po
 command. After the worker is forked, startup unsets those variables before launching the
 server/gateway/agent process tree. Hermes's
 cron credential filtering remains unchanged. No official paid X API is used.
+The worker always uses Bird: a stale `X_BOOKMARK_PROVIDER=oauth` setting is
+ignored and does not need a separate variable change or restart. The dormant
+OAuth module and its persistent ledger are retained but never called by this
+collector; do not delete the ledger as part of this switch.
 
 The signed wiki gate reads only `/data/.hermes/state/x-bookmark-review/snapshot.json`.
 No new/unfinished work means no model call. Publication receipts and confirmed

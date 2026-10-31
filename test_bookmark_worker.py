@@ -84,6 +84,63 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn('X_BOOKMARK_OAUTH_BOOTSTRAP', W.jesse_env(env))
         with self.assertRaises(ValueError): W.bird_env({})
 
+    def test_fixed_bird_command_and_stale_oauth_setting(self):
+        env = {'PATH': '/bin', 'X_BIRD_AUTH_TOKEN': 'cookie-one',
+               'X_BIRD_CT0': 'cookie-two', 'X_BOOKMARK_PROVIDER': 'oauth',
+               'X_OAUTH_CLIENT_SECRET': 'oauth-secret'}
+        posts = [{'id': '123', 'text': 'bookmark', 'author': {'username': 'alice'}}]
+        with patch.object(W.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps(posts).encode())) as run:
+            self.assertEqual(W.collect_bird(env), posts)
+        run.assert_called_once_with(
+            ['bird', 'bookmarks', '--count', '100', '--json', '--plain'],
+            env={'PATH': '/bin', 'AUTH_TOKEN': 'cookie-one', 'CT0': 'cookie-two'},
+            capture_output=True, timeout=90)
+
+    def test_bird_rejects_partial_or_malformed_output(self):
+        valid = {'id': '123', 'text': 'bookmark', 'author': {'username': 'alice'}}
+        bad_responses = [[], {}, [valid, valid], [valid] * 101,
+                         [{'id': '', 'text': 'x', 'author': {'username': 'a'}}],
+                         [{'id': 123, 'text': 'x', 'author': {'username': 'a'}}],
+                         [{'id': '123', 'author': {'username': 'a'}}],
+                         [{'id': '123', 'text': 'x', 'author': {}}],
+                         [valid, None]]
+        with patch.object(W, 'bird_env', return_value={}), patch.object(W.subprocess, 'run') as run:
+            for response in bad_responses:
+                with self.subTest(response=response):
+                    run.return_value = subprocess.CompletedProcess([], 0, json.dumps(response).encode())
+                    with self.assertRaisesRegex(ValueError, 'Invalid bookmark response'):
+                        W.collect_bird({})
+            for payload in (b'not json', b'[{"id":', b'\xff'):
+                with self.subTest(payload=payload):
+                    run.return_value = subprocess.CompletedProcess([], 0, payload)
+                    with self.assertRaisesRegex(ValueError, 'Invalid bookmark response'):
+                        W.collect_bird({})
+
+    def test_bird_timeout_and_nonzero_never_publish_stderr(self):
+        with patch.object(W, 'bird_env', return_value={}), patch.object(W.subprocess, 'run') as run:
+            run.return_value = subprocess.CompletedProcess([], 1, b'secret stdout', b'secret stderr')
+            with self.assertRaisesRegex(ValueError, '^Bookmark read failed$') as error:
+                W.collect_bird({})
+            self.assertNotIn('secret', str(error.exception))
+            run.side_effect = subprocess.TimeoutExpired(['bird'], 90, stderr=b'secret stderr')
+            with self.assertRaises(subprocess.TimeoutExpired):
+                W.collect_bird({})
+
+    def test_successful_cycle_writes_snapshot_without_oauth(self):
+        posts = [{'id': '123', 'text': 'bookmark', 'author': {'username': 'alice'}}]
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(W, 'sync_repository', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(W, 'verify_runtime'), patch.object(W, 'collect_bird', return_value=posts) as bird, \
+             patch.dict('sys.modules', {'bookmark_oauth': None}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            path = Path(td) / 'status.json'; state = {}
+            W.cycle(state, path, 'a' * 12, clock=lambda: 100)
+            self.assertEqual(json.loads((Path(td) / 'snapshot.json').read_text())['posts'], posts)
+            self.assertEqual(state['collection_status'], 'ok')
+            self.assertEqual(state['next_run_at'], 3700)
+            bird.assert_called_once_with()
+
     def test_signature_failure_prevents_bird_and_preserves_deadline(self):
         with tempfile.TemporaryDirectory() as td, patch.object(W,'job_state'),patch.object(W,'verify_runtime',side_effect=ValueError('bad signature')),patch.object(W.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as run,contextlib.redirect_stdout(io.StringIO()):
             path=Path(td)/'status.json'; state={}
@@ -91,11 +148,12 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(run.call_count,1)
             self.assertEqual(state['next_run_at'],3700); self.assertEqual(state['status'],'failed')
 
-    def test_failed_read_suppresses_secret_stderr_but_runs_failure_gate(self):
-        with tempfile.TemporaryDirectory() as td,patch.object(W,'job_state'),patch.object(W,'verify_runtime'),patch.object(W,'bird_env',return_value={}),patch.object(W.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0),subprocess.CompletedProcess([],1,b'',b'secret cookie')]),patch.object(W,'acknowledge',return_value='blocked'),contextlib.redirect_stdout(io.StringIO()):
+    def test_failed_read_suppresses_secret_stderr_in_snapshot_and_status(self):
+        with tempfile.TemporaryDirectory() as td,patch.object(W,'job_state'),patch.object(W,'verify_runtime'),patch.object(W,'bird_env',return_value={}),patch.object(W.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0),subprocess.CompletedProcess([],1,b'',b'secret cookie')]),contextlib.redirect_stdout(io.StringIO()):
             path=Path(td)/'status.json'; state={}; W.cycle(state,path,'a'*12,clock=lambda:100)
             self.assertEqual(json.loads((Path(td)/'snapshot.json').read_text())['status'],'failed')
             self.assertNotIn('secret cookie',path.read_text())
+            self.assertNotIn('secret cookie',(Path(td)/'snapshot.json').read_text())
 
     def test_failed_delivery_does_not_acknowledge(self):
         with tempfile.TemporaryDirectory() as td,patch.object(W,'job_state',return_value={'last_run_at':'2026-09-27T15:00:00+00:00','last_status':'ok','last_delivery_error':'failed'}):

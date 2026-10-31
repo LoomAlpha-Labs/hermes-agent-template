@@ -1,6 +1,12 @@
-# Official X bookmark reader (not yet enabled)
+# Historical official X bookmark reader (inactive)
 
-This image replaces the worker's Bird subprocess with an opt-in OAuth reader.
+The fixed hourly worker now uses Bird cookies regardless of a stale
+`X_BOOKMARK_PROVIDER=oauth` setting. That setting needs no separate change or
+restart. This document describes the retained, inactive OAuth module and
+ledger; its activation instructions below are historical and do not activate
+OAuth in the current worker. Do not delete the persistent ledger.
+
+The earlier OAuth candidate replaced the worker's Bird subprocess with an opt-in reader.
 The hourly worker and research schedule, 100-post window, existing snapshot
 format, overlap checks and checkpoint/delivery logic are unchanged. A missing
 OAuth configuration or failed/partial response produces a failed snapshot;

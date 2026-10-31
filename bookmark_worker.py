@@ -42,6 +42,34 @@ def bird_env(environ):
     return result
 
 
+def collect_bird(environ=None):
+    """Read the fixed 100-bookmark window; reject incomplete/malformed output."""
+    result = subprocess.run(['bird', 'bookmarks', '--count', '100', '--json', '--plain'],
+                            env=bird_env(os.environ if environ is None else environ),
+                            capture_output=True, timeout=90)
+    if result.returncode:
+        raise ValueError('Bookmark read failed')
+    try:
+        posts = json.loads(result.stdout)
+    except (UnicodeError, ValueError):
+        raise ValueError('Invalid bookmark response') from None
+    if not isinstance(posts, list) or not 1 <= len(posts) <= 100:
+        raise ValueError('Invalid bookmark response')
+    ids = set()
+    for post in posts:
+        if (not isinstance(post, dict)
+                or not isinstance(post.get('id'), str)
+                or not re.fullmatch(r'[0-9]+', post['id'])
+                or not isinstance(post.get('text'), str)
+                or not isinstance(post.get('author'), dict)
+                or not isinstance(post['author'].get('username'), str)
+                or not post['author']['username']
+                or post['id'] in ids):
+            raise ValueError('Invalid bookmark response')
+        ids.add(post['id'])
+    return posts
+
+
 def jesse_env(environ):
     return {k: v for k, v in environ.items()
             if k not in ('AUTH_TOKEN', 'CT0', 'X_BOOKMARK_OAUTH_BOOTSTRAP')
@@ -210,13 +238,12 @@ def cycle(state, status_path, job_id, clock=time.time):
         snapshot = {'collected_at_utc': datetime.now(timezone.utc).isoformat(),
                     'sync_ok': sync.returncode == 0, 'status': 'failed'}
         try:
-            from bookmark_oauth import collect
-            posts = collect()
+            posts = collect_bird()
             snapshot.update(status='ok', posts=posts)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             # Never save/log raw stderr, response fragments or credentials.
             snapshot['status'] = 'failed'
-            snapshot['reason'] = 'Official bookmark collection unavailable; inspect authorization or budget'
+            snapshot['reason'] = 'Bookmark collection unavailable; inspect Bird session'
         atomic(status_path.parent / 'snapshot.json', snapshot)
         state.update(status='waiting',
                      collection_status=snapshot['status'], sync_ok=snapshot['sync_ok'])
