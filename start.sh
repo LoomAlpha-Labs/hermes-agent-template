@@ -67,7 +67,7 @@ if [ "${JEV_LIVE_ENABLED:-0}" = "1" ]; then
   ) &
 fi
 
-# Owner-requested hourly bookmarks. Credentials are used only by the fixed OAuth
+# Owner-requested hourly bookmarks. Cookies are used only by the fixed Bird
 # child; Jesse's cron precheck receives a private data snapshot without secrets.
 if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
   (
