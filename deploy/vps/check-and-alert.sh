@@ -21,9 +21,13 @@ fi
 
 # printf is a shell builtin and curl reads its config from stdin, so the
 # token never appears in any process argument list.
-printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
-  curl -sS -o /dev/null --max-time 20 --config - \
+code="$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 20 --config - \
     --data-urlencode "chat_id=$chat" \
     --data-urlencode "text=hermes host check failed on $(hostname):
-$out" || echo "alert delivery failed" >&2
+$out" 2>/dev/null)"
+case "$code" in
+  2??) ;;
+  *) echo "alert delivery failed (HTTP status ${code:-none})" >&2 ;;
+esac
 exit "$rc"

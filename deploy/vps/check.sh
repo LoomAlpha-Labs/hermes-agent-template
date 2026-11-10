@@ -14,6 +14,7 @@
 #   reboot_required_age_days  age in whole days of /var/run/reboot-required
 #                           (file absent = no reboot pending)
 #   hermes_env_mode         octal mode of /etc/hermes/hermes.env, e.g. 600
+#   hermes_env_owner        owner:group of /etc/hermes/hermes.env, e.g. root:root
 # Without an override, the same files are gathered live from the host.
 set -u
 
@@ -22,7 +23,8 @@ if [ "${1:-}" = "--root" ]; then ROOT="${2:-}"; fi
 
 DATA_DIR=/srv/hermes/data
 ENV_FILE=/etc/hermes/hermes.env
-MIN_SWAP=$((8 * 1024 * 1024 * 1024))
+# 8 GiB swapfile reports 8388604 kB (mkswap header page); allow one 64 KiB page of slack.
+MIN_SWAP=$((8 * 1024 * 1024 * 1024 - 65536))
 
 if [ -z "$ROOT" ]; then
   ROOT="$(mktemp -d)"
@@ -37,7 +39,28 @@ if [ -z "$ROOT" ]; then
     echo $(( ( $(date +%s) - $(stat -c %Y /var/run/reboot-required) ) / 86400 )) >"$ROOT/reboot_required_age_days"
   fi
   stat -c %a "$ENV_FILE" >"$ROOT/hermes_env_mode" 2>/dev/null
+  stat -c %U:%G "$ENV_FILE" >"$ROOT/hermes_env_owner" 2>/dev/null
 fi
+
+# True if any ALLOW/LIMIT rule without "on tailscale0" names port 22, a list or
+# range containing 22, the OpenSSH profile, or "Anywhere" (all ports).
+ufw_covers_22_publicly() {
+  local line to tok lo hi
+  while IFS= read -r line; do
+    case "$line" in *ALLOW*|*LIMIT*) ;; *) continue ;; esac
+    to="$(sed -E 's/[[:space:]]+(ALLOW|LIMIT)[[:space:]].*//' <<<"$line")"
+    case "$to" in *" on tailscale0"*) continue ;; esac
+    to="${to%% on *}"; to="${to// (v6)/}"
+    case "$to" in OpenSSH|Anywhere) return 0 ;; esac
+    to="${to%%/*}"
+    IFS=, read -ra toks <<<"$to"
+    for tok in "${toks[@]}"; do
+      lo="${tok%%:*}"; hi="${tok##*:}"
+      if [ "$lo" -le 22 ] 2>/dev/null && [ "$hi" -ge 22 ] 2>/dev/null; then return 0; fi
+    done
+  done <"$1"
+  return 1
+}
 
 violations=()
 v() { violations+=("$1"); }
@@ -62,8 +85,8 @@ if have ufw_status; then
     if ! grep -q '^Default: deny (incoming)' "$ROOT/ufw_status"; then
       v "firewall: default incoming policy is not deny"; fw_ok=0
     fi
-    # Any rule for port 22 not scoped to tailscale0 breaks the SSH gate.
-    if grep -E '^22(/(tcp|udp))?( |$)' "$ROOT/ufw_status" | grep -qv ' on tailscale0 '; then
+    # Any ALLOW/LIMIT rule not scoped to tailscale0 that covers port 22 breaks the SSH gate.
+    if ufw_covers_22_publicly "$ROOT/ufw_status"; then
       v "firewall: port 22 allowed on a non-tailscale0 interface"; fw_ok=0
     fi
   fi
@@ -115,6 +138,10 @@ fi
 mode="$(tr -dc '0-9' <"$ROOT/hermes_env_mode" 2>/dev/null)"
 if [ "$mode" != "600" ]; then
   v "secrets: $ENV_FILE mode ${mode:-missing}, want 600"
+fi
+owner="$(tr -d '[:space:]' <"$ROOT/hermes_env_owner" 2>/dev/null)"
+if [ "$owner" != "root:root" ]; then
+  v "secrets: $ENV_FILE owner ${owner:-unknown}, want root:root"
 fi
 
 if [ "${#violations[@]}" -gt 0 ]; then
