@@ -1,0 +1,26 @@
+[Unit]
+Description=Hermes Agent container
+Wants=network-online.target
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# deploy.sh writes IMAGE, PORT and the DEPLOY_* values here (no secrets).
+# systemd uses it to expand ${IMAGE} and ${PORT}; docker passes it to the container.
+EnvironmentFile=/srv/hermes/deploy.env
+ExecStartPre=-/usr/bin/docker rm -f hermes
+# Publish on loopback only: Docker-published ports bypass ufw.
+ExecStart=/usr/bin/docker run --rm --name hermes \
+  -p 127.0.0.1:${PORT}:${PORT} \
+  -v /srv/hermes/data:/data \
+  --env-file /etc/hermes/hermes.env \
+  --env-file /srv/hermes/deploy.env \
+  ${IMAGE}
+ExecStop=/usr/bin/docker stop -t 30 hermes
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

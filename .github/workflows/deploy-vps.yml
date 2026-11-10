@@ -1,0 +1,118 @@
+# Build the Hermes image, push to GHCR, deploy to the VPS over Tailscale.
+#
+# Deploys are OFF until the owner enables them. Required setup:
+#   Repository variable:  VPS_DEPLOY_ENABLED = true   (job is skipped otherwise)
+#   Repository secrets:
+#     TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET  Tailscale OAuth client, scope auth_keys, tag tag:ci
+#     VPS_SSH_KEY                          private key whose public half is in hermes' authorized_keys
+#     VPS_TAILNET_HOST                     tailnet name or 100.x address of the VPS
+#     VPS_KNOWN_HOSTS                      pinned known_hosts line(s) for the VPS (ssh-keyscan output
+#                                          verified out of band)
+#   Tailnet ACL: tag:ci may reach only tag:hermes:22.
+#   Host: /srv/hermes/RAILWAY_STOPPED must exist (deploy.sh refuses otherwise).
+name: deploy-vps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  deployments: write
+
+# Never overlap deploys; a newer push waits for the running one.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ vars.VPS_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/loomalpha-labs/hermes-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/loomalpha-labs/hermes-agent:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Create GitHub deployment
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/${{ github.repository }}/deployments" \
+            -f ref="${{ github.sha }}" \
+            -f environment=vps-production \
+            -F auto_merge=false \
+            -F required_contexts='[]' \
+            -f 'payload={"sha":"${{ github.sha }}"}' \
+            --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy on VPS
+        id: deploy
+        env:
+          HOST: ${{ secrets.VPS_TAILNET_HOST }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $HOME/.ssh/id_deploy -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes hermes@$HOST"
+          # Short-lived token goes over stdin; nothing is stored long-term on the host.
+          printf '%s' "$GHCR_TOKEN" | $SSH "docker login ghcr.io -u '$ACTOR' --password-stdin"
+          rc=0
+          # deploy.sh from this exact commit is sent on stdin and read fully by cat first
+          # (so no command inside the script can swallow the rest of the script).
+          $SSH "bash -c \"\$(cat)\" deploy.sh '${{ github.sha }}' '${{ github.run_id }}'" < deploy/vps/deploy.sh || rc=$?
+          $SSH "docker logout ghcr.io" || true
+          exit "$rc"
+
+      - name: Mark deployment success
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/deployments/${{ steps.deployment.outputs.id }}/statuses" \
+            -f state=success -f description="health gate passed" >/dev/null
+
+      - name: Mark deployment failure
+        if: ${{ failure() && steps.deployment.outputs.id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/deployments/${{ steps.deployment.outputs.id }}/statuses" \
+            -f state=failure -f description="deploy failed or rolled back" >/dev/null

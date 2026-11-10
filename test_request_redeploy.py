@@ -223,6 +223,78 @@ class RequestRedeployTests(unittest.TestCase):
                 run=runner,
             )
 
+    def _vps_run(self, deployments, statuses, **extra):
+        runner = FakeRunner(
+            [
+                (0, {"object": {"sha": HEAD}}),
+                (0, {"tree": {"sha": TREE}}),
+                (0, {"sha": NEW}),
+                (0, {"object": {"sha": NEW}}),
+                (0, deployments),
+            ]
+            + ([(0, statuses)] if statuses is not None else [])
+        )
+        clock = Clock()
+        return runner, lambda: request_redeploy(
+            repo="owner/repo",
+            branch="main",
+            live_sha=HEAD,
+            reason="vps test",
+            execute=True,
+            platform="vps",
+            receipt_timeout=extra.get("timeout", 120.0),
+            run=runner,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+    def test_accepts_vps_deployment_receipt(self):
+        dep = {
+            "id": 7,
+            "sha": NEW,
+            "environment": "vps-production",
+            "creator": {"login": "github-actions[bot]"},
+            "payload": {"sha": NEW},
+        }
+        runner, call = self._vps_run([dep], [{"state": "success"}])
+        result = call()  # no Railway args, no railway-app[bot] creator
+        self.assertEqual(result["deployment_id"], 7)
+        self.assertEqual(result["environment"], "vps-production")
+        self.assertIn("vps-production", result["acceptance"])
+
+    def test_vps_rejects_wrong_environment_creator_sha_or_status(self):
+        base = {
+            "id": 7,
+            "sha": NEW,
+            "environment": "vps-production",
+            "creator": {"login": "github-actions[bot]"},
+            "payload": {"sha": NEW},
+        }
+        bad = [
+            ({**base, "environment": "production"}, None),
+            ({**base, "creator": {"login": "railway-app[bot]"}}, None),
+            ({**base, "payload": {"sha": HEAD}}, None),
+            (base, [{"state": "failure"}, {"state": "in_progress"}]),
+        ]
+        for dep, statuses in bad:
+            with self.subTest(dep=dep):
+                runner, call = self._vps_run([dep], statuses, timeout=4.0)
+                # polling repeats the deployments query; give extra empty responses
+                runner.responses += [(0, [])] * 5 + [(0, statuses or [])] * 5
+                with self.assertRaises(DeploymentReceiptTimeout):
+                    call()
+
+    def test_railway_mode_still_requires_railway_arguments(self):
+        with self.assertRaisesRegex(ValueError, "Railway environment ID"):
+            request_redeploy(
+                repo="owner/repo",
+                branch="main",
+                live_sha=HEAD,
+                reason="x",
+                execute=False,
+                run=FakeRunner([]),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

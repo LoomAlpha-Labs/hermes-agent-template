@@ -127,6 +127,18 @@ install -m 644 "$HERE/hermes-check.service" "$HERE/hermes-check.timer" /etc/syst
 systemctl daemon-reload
 systemctl enable --now hermes-check.timer
 
+# 8b. Hermes container unit + scoped sudo for deploy.sh (runs as hermes)
+log "hermes service + sudoers"
+chown hermes:hermes /srv/hermes  # deploy.sh writes deploy.env, current_ref here
+install -m 644 "$HERE/hermes.service" /etc/systemd/system/hermes.service
+systemctl daemon-reload
+systemctl enable hermes  # not started: first deploy.sh run starts it
+tmp_sudoers="$(mktemp)"
+install -m 440 "$HERE/hermes-sudoers" "$tmp_sudoers"
+visudo -cf "$tmp_sudoers" >/dev/null || { rm -f "$tmp_sudoers"; die "hermes-sudoers failed visudo validation"; }
+install -m 440 -o root -g root "$tmp_sudoers" /etc/sudoers.d/hermes
+rm -f "$tmp_sudoers"
+
 # 9. Firewall, last: only tailscale0 may reach port 22
 log "ufw"
 ufw default deny incoming
