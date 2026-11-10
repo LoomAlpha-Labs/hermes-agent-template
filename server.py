@@ -657,12 +657,25 @@ def _safe_return_to(value: str) -> str:
     return value
 
 
+def _secure_cookie(scheme: str, env) -> bool:
+    """https always wins; HERMES_SECURE_COOKIES forces it on/off for http;
+    unset keeps the Railway behavior (RAILWAY_ENVIRONMENT_ID => secure)."""
+    if scheme == "https":
+        return True
+    flag = (env.get("HERMES_SECURE_COOKIES") or "").strip().lower()
+    if flag in ("1", "true"):
+        return True
+    if flag in ("0", "false"):
+        return False
+    return bool(env.get("RAILWAY_ENVIRONMENT_ID"))
+
+
 def _trusted_browser_origin(request) -> bool:
     """Cookies authenticate the user; an exact origin binds browser requests."""
     origin = request.headers.get("origin")
     expected = os.environ.get("HERMES_PUBLIC_ORIGIN", "").rstrip("/")
     if not expected:
-        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+        domain = os.environ.get("HERMES_PUBLIC_DOMAIN") or os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
         expected = f"https://{domain}" if domain else str(request.base_url).rstrip("/").replace("wss://", "https://", 1).replace("ws://", "http://", 1)
     if origin and origin != expected:
         return False
@@ -776,7 +789,7 @@ async def login_post(request: Request) -> Response:
             _make_auth_token(),
             max_age=COOKIE_MAX_AGE,
             httponly=True,
-            secure=(request.url.scheme == "https" or bool(os.environ.get("RAILWAY_ENVIRONMENT_ID"))),
+            secure=_secure_cookie(request.url.scheme, os.environ),
             samesite="lax",
             path="/",
         )
