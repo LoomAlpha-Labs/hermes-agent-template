@@ -14,6 +14,12 @@ INIT_USER="${SUDO_USER:-}"
 log() { echo "==> $*"; }
 die() { echo "ABORT: $*" >&2; exit 1; }
 
+# 0. KVM fallback guard. If Tailscale ever fails, the OVH web KVM console is the only
+# way back in, and it needs a local password. Check it before changing anything.
+KVM_USER="${INIT_USER:-root}"
+kvm_status="$(passwd -S "$KVM_USER" 2>/dev/null | awk '{print $2}')"
+[ "$kvm_status" = "P" ] || die "user '$KVM_USER' has no usable password for the OVH web KVM console. Run: sudo passwd $KVM_USER   then re-run this script."
+
 # 1. System update
 log "apt upgrade"
 apt-get update -y
@@ -36,7 +42,7 @@ else
 fi
 if [ -n "$src" ]; then
   touch /home/hermes/.ssh/authorized_keys
-  while IFS= read -r key; do
+  while IFS= read -r key || [ -n "$key" ]; do
     [ -n "$key" ] && ! grep -qxF "$key" /home/hermes/.ssh/authorized_keys && echo "$key" >>/home/hermes/.ssh/authorized_keys
   done <"$src"
 fi
@@ -85,6 +91,10 @@ C
 cat >/etc/apt/apt.conf.d/52hermes-unattended <<'C'
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+// Also take security updates from the Docker and Tailscale apt repos.
+// A Docker upgrade restarts the daemon; hermes.service has Restart=always.
+Unattended-Upgrade::Allowed-Origins:: "site=download.docker.com";
+Unattended-Upgrade::Allowed-Origins:: "site=pkgs.tailscale.com";
 C
 systemctl enable --now unattended-upgrades
 
@@ -139,7 +149,26 @@ visudo -cf "$tmp_sudoers" >/dev/null || { rm -f "$tmp_sudoers"; die "hermes-sudo
 install -m 440 -o root -g root "$tmp_sudoers" /etc/sudoers.d/hermes
 rm -f "$tmp_sudoers"
 
-# 9. Firewall, last: only tailscale0 may reach port 22
+# 9. Firewall, last: only tailscale0 may reach port 22.
+# Lockout guard: unless ufw is already active with the compliant rules (a re-run),
+# the operator must prove SSH over Tailscale works from a second terminal first.
+ufw_compliant() {
+  ufw status verbose 2>/dev/null | grep -q '^Status: active' &&
+    ufw status verbose 2>/dev/null | grep -q 'Default: deny (incoming)' &&
+    ufw status 2>/dev/null | grep -Eq '^22/tcp on tailscale0[[:space:]]+ALLOW' &&
+    ! ufw status 2>/dev/null | grep -E '^(22(/tcp)?|OpenSSH)[[:space:]]+ALLOW' | grep -qv tailscale0
+}
+if ufw_compliant; then
+  log "ufw already active with compliant rules; skipping confirmation pause"
+else
+  echo
+  echo "About to enable the firewall. Public SSH will stop working."
+  echo "Open a SECOND terminal and confirm this works first:"
+  echo "    ssh ${INIT_USER:-hermes}@$TS_IP"
+  echo "(Fallback if it fails later: OVH web KVM console, login '$KVM_USER' + its password.)"
+  read -r -p "Type YES to enable ufw: " answer || die "no input; firewall not enabled"
+  [ "$answer" = "YES" ] || die "confirmation not given; firewall not enabled"
+fi
 log "ufw"
 ufw default deny incoming
 ufw default allow outgoing

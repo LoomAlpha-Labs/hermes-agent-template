@@ -5,6 +5,8 @@
 # Flow: guard -> pull -> tag current as previous -> restart -> health gate
 #       -> on failure restore previous (or stop if none) -> prune old images.
 # Exit codes: 0 deployed and healthy; 1 deploy failed (rolled back / stopped); 2 refused.
+# Healthy = /health/ready returns 200 AND reports commit_sha_prefix equal to the first
+# 12 chars of <commit-sha>. A container without a real identity is never written.
 # Env overrides (tests): HERMES_ROOT, IMAGE_REPO, PORT, HEALTH_TIMEOUT, HEALTH_INTERVAL.
 # Prints no secret values; deploy.env holds none.
 set -uo pipefail
@@ -30,9 +32,13 @@ fi
 
 SHA="${1:-}"
 DEPLOY_ID="${2:-$SHA}"
-[[ "$SHA" =~ ^[0-9a-f]{7,40}$ ]] || { echo "usage: deploy.sh <commit-sha> [deploy-id]" >&2; exit 2; }
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: deploy.sh <40-hex-commit-sha> [deploy-id]" >&2; exit 2; }
 [[ "$DEPLOY_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid deploy id" >&2; exit 2; }
 NEW_REF="$IMAGE_REPO:$SHA"
+
+# Host-side lock: two deploys can never overlap, whatever started them.
+exec 9>"$ROOT/deploy.lock"
+flock -n 9 || { echo "refusing: another deploy is running (lock $ROOT/deploy.lock)" >&2; exit 2; }
 
 write_env() {  # write_env <sha> <id>; atomic, no secrets
   local tmp="$ENV_FILE.tmp.$$"
@@ -69,8 +75,11 @@ healthy=0
 if sc restart hermes; then
   deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
   while :; do
-    if curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:${PORT}/health/ready"; then
-      healthy=1; break
+    if body="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health/ready")"; then
+      got="$(printf '%s' "$body" | sed -n 's/.*"commit_sha_prefix"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')"
+      if [ -n "$got" ] && [ "$got" = "${SHA:0:12}" ]; then
+        healthy=1; break
+      fi
     fi
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep "$HEALTH_INTERVAL"
@@ -84,8 +93,8 @@ if [ "$healthy" -ne 1 ]; then
   if [ "$had_current" -eq 1 ]; then
     log "rollback to $LOCAL_PREVIOUS"
     if docker tag "$LOCAL_PREVIOUS" "$LOCAL_CURRENT"; then
-      if [ -f "$ENV_FILE.prev" ]; then mv "$ENV_FILE.prev" "$ENV_FILE" && rolled_back=1
-      elif write_env "unknown" "rollback"; then rolled_back=1; fi
+      # Only a saved env with a real identity may be restored; never fabricate one.
+      if [ -f "$ENV_FILE.prev" ]; then mv "$ENV_FILE.prev" "$ENV_FILE" && rolled_back=1; fi
     fi
     if [ "$rolled_back" -eq 1 ]; then
       sc restart hermes || echo "WARNING: restart of previous image failed" >&2

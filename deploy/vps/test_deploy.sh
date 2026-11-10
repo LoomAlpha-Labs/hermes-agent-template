@@ -32,7 +32,14 @@ S
   cat >"$d/bin/curl" <<'S'
 #!/usr/bin/env bash
 echo "curl $*" >>"$STUB_LOG"
-[ "${STUB_HEALTH:-200}" = 200 ] && exit 0 || exit 22
+[ "${STUB_HEALTH:-200}" = 200 ] || exit 22
+if [ -n "${STUB_BODY:-}" ]; then echo "$STUB_BODY"; else echo '{"status":"ready","commit_sha_prefix":"aaaaaaaaaaaa","fresh":true}'; fi
+exit 0
+S
+  cat >"$d/bin/flock" <<'S'
+#!/usr/bin/env bash
+[ "${STUB_LOCK_FAIL:-0}" = 1 ] && exit 1
+exit 0
 S
   chmod +x "$d/bin/"*
   echo "$d"
@@ -118,10 +125,41 @@ runcase "$d" STUB_HEALTH=503 STUB_HAS_CURRENT=1 STUB_TAG_FAIL="hermes-agent:prev
 has "$d" "systemctl stop hermes"; check "rollback tag failure stops" $?
 [ ! -e "$d/root/deploy.env" ]; check "rollback tag failure removes deploy.env" $?
 
+# 5c. rollback has no saved deploy.env -> never write an identity-less env; stop instead
+d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
+runcase "$d" STUB_HEALTH=503 STUB_HAS_CURRENT=1
+[ "$rc" -eq 1 ]; check "rollback without saved env exit 1" $?
+has "$d" "systemctl stop hermes"; check "rollback without saved env stops" $?
+[ ! -e "$d/root/deploy.env" ]; check "no unknown-identity deploy.env written" $?
+
+# 5d. readiness reports a different commit than the one deployed -> rollback
+d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
+echo "DEPLOY_COMMIT_SHA=oldsha" >"$d/root/deploy.env"
+echo ghcr.io/loomalpha-labs/hermes-agent:oldold >"$d/root/current_ref"
+runcase "$d" STUB_HAS_CURRENT=1 STUB_BODY='{"status":"ready","commit_sha_prefix":"bbbbbbbbbbbb"}'
+[ "$rc" -eq 1 ]; check "sha mismatch exit 1" $?
+has "$d" "docker tag hermes-agent:previous hermes-agent:current"; check "sha mismatch rolls back" $?
+[ "$(cat "$d/root/current_ref")" = "ghcr.io/loomalpha-labs/hermes-agent:oldold" ]; check "sha mismatch keeps current_ref" $?
+# ready with no sha field at all is also a failure
+d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
+runcase "$d" STUB_HAS_CURRENT=0 STUB_BODY='{"status":"ready"}'
+[ "$rc" -eq 1 ]; check "missing sha in readiness exit 1" $?
+
+# 5e. host-side lock: a second concurrent run refuses without touching anything
+d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
+runcase "$d" STUB_LOCK_FAIL=1
+[ "$rc" -eq 2 ]; check "lock held exit 2" $?
+[[ "$out" == *"another deploy is running"* ]]; check "lock message" $?
+! has "$d" "docker"; check "lock held touches nothing" $?
+
 # 6. bad sha argument
 d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
 out="$(env PATH="$d/bin:$PATH" STUB_LOG="$d/log" HERMES_ROOT="$d/root" "$HERE/deploy.sh" 'x;rm -rf /' 2>&1)"; rc=$?
 [ "$rc" -eq 2 ]; check "bad sha rejected" $?
+for bad in abc1234 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa unknown; do
+  out="$(env PATH="$d/bin:$PATH" STUB_LOG="$d/log" HERMES_ROOT="$d/root" "$HERE/deploy.sh" "$bad" 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ]; check "sha '$bad' rejected" $?
+done
 
 echo "deploy tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

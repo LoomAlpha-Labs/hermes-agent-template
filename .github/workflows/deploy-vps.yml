@@ -35,17 +35,32 @@ jobs:
     env:
       IMAGE: ghcr.io/loomalpha-labs/hermes-agent
     steps:
-      - uses: actions/checkout@v4
+      # First: the deployment record exists before anything can fail, so every later
+      # failure or cancel is marked on it by the last step.
+      - name: Create GitHub deployment
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Request body (real JSON types; gh -F would send "[]" as a string and get a 422):
+          #   {"ref":"<sha>","environment":"vps-production","auto_merge":false,
+          #    "required_contexts":[],"payload":{"sha":"<sha>"}}
+          id=$(jq -n --arg sha "${{ github.sha }}" \
+            '{ref:$sha, environment:"vps-production", auto_merge:false, required_contexts:[], payload:{sha:$sha}}' |
+            gh api "repos/${{ github.repository }}/deployments" --method POST --input - --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -53,7 +68,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - uses: tailscale/github-action@v3
+      - uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
@@ -69,19 +84,6 @@ jobs:
           chmod 600 ~/.ssh/id_deploy
           printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
-      - name: Create GitHub deployment
-        id: deployment
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Request body (real JSON types; gh -F would send "[]" as a string and get a 422):
-          #   {"ref":"<sha>","environment":"vps-production","auto_merge":false,
-          #    "required_contexts":[],"payload":{"sha":"<sha>"}}
-          id=$(jq -n --arg sha "${{ github.sha }}" \
-            '{ref:$sha, environment:"vps-production", auto_merge:false, required_contexts:[], payload:{sha:$sha}}' |
-            gh api "repos/${{ github.repository }}/deployments" --method POST --input - --jq .id)
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-
       - name: Deploy on VPS
         id: deploy
         env:
@@ -90,21 +92,31 @@ jobs:
           ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
-          SSH="ssh -i $HOME/.ssh/id_deploy -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes hermes@$HOST"
+          SSH="ssh -i $HOME/.ssh/id_deploy -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 hermes@$HOST"
+          RUN_DIR="/srv/hermes/run/${{ github.run_id }}-${{ github.run_attempt }}"
           # Short-lived token goes over stdin; nothing is stored long-term on the host.
           printf '%s' "$GHCR_TOKEN" | $SSH "docker login ghcr.io -u '$ACTOR' --password-stdin"
-          rc=0
-          # deploy.sh from this exact commit is sent on stdin and read fully by cat first
-          # (so no command inside the script can swallow the rest of the script).
-          $SSH "bash -c \"\$(cat)\" deploy.sh '${{ github.sha }}' '${{ github.run_id }}'" < deploy/vps/deploy.sh || rc=$?
+          # Upload deploy.sh from this exact commit, then run it DETACHED on the host
+          # (setsid + nohup), so an SSH drop or a cancelled job cannot kill it mid-flight.
+          # It writes its log to $RUN_DIR/log and its exit code to $RUN_DIR/rc when done.
+          $SSH "find /srv/hermes/run -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null; mkdir -p '$RUN_DIR' && cat > '$RUN_DIR/deploy.sh' && chmod 700 '$RUN_DIR/deploy.sh'" < deploy/vps/deploy.sh
+          $SSH "cd '$RUN_DIR' && setsid nohup bash -c 'bash ./deploy.sh ${{ github.sha }} ${{ github.run_id }} >log 2>&1; echo \$? >rc.tmp; mv rc.tmp rc' >/dev/null 2>&1 </dev/null &"
+          # Poll: stream new log lines, stop when rc appears. Tolerate short SSH outages.
+          n=0; fails=0; rc=""
+          for _ in $(seq 1 360); do
+            sleep 5
+            if r="$($SSH "cat '$RUN_DIR/rc' 2>/dev/null || true")"; then rc="$r"; fails=0; else fails=$((fails+1)); rc=""; fi
+            if chunk="$($SSH "tail -n +$((n+1)) '$RUN_DIR/log' 2>/dev/null || true")"; then
+              if [ -n "$chunk" ]; then printf '%s\n' "$chunk"; n=$((n + $(printf '%s\n' "$chunk" | wc -l))); fi
+            else
+              fails=$((fails+1))
+            fi
+            [ "$fails" -ge 24 ] && { echo "::error::lost SSH for 2 minutes; deploy.sh may still be running on the host (log: $RUN_DIR/log)"; exit 1; }
+            [[ "$rc" =~ ^[0-9]+$ ]] && break
+          done
+          [[ "$rc" =~ ^[0-9]+$ ]] || { echo "::error::deploy.sh did not finish in time"; exit 1; }
+          echo "deploy.sh exit code: $rc"
           exit "$rc"
-
-      - name: Docker logout on host
-        if: ${{ always() && steps.deploy.conclusion != 'skipped' }}
-        env:
-          HOST: ${{ secrets.VPS_TAILNET_HOST }}
-        run: |
-          ssh -i "$HOME/.ssh/id_deploy" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 "hermes@$HOST" "docker logout ghcr.io" || echo "::warning::docker logout on host failed"
 
       - name: Mark deployment success
         if: ${{ success() }}
@@ -113,6 +125,13 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/deployments/${{ steps.deployment.outputs.id }}/statuses" \
             -f state=success -f description="health gate passed" >/dev/null
+
+      - name: Docker logout on host
+        if: ${{ always() && steps.deploy.conclusion != 'skipped' }}
+        env:
+          HOST: ${{ secrets.VPS_TAILNET_HOST }}
+        run: |
+          ssh -i "$HOME/.ssh/id_deploy" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "hermes@$HOST" "docker logout ghcr.io" || echo "::warning::docker logout on host failed"
 
       - name: Mark deployment failure
         if: ${{ (failure() || cancelled()) && steps.deployment.outputs.id != '' }}

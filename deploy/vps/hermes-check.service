@@ -1,5 +1,6 @@
 [Unit]
 Description=Hermes host security check
+Wants=network-online.target
 After=network-online.target
 
 [Service]

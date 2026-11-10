@@ -60,8 +60,14 @@
 - [ ] Run it and expect FAIL (no `check.sh`).
 - [ ] Implement `check.sh`. Checks: sshd effective config (the three settings), ufw active + default deny, no non-loopback/non-tailscale listener (`ss -tlnH`), `unattended-upgrades` enabled, swap ≥ 8 GB, `/data` < 80% used, `/var/run/reboot-required` older than 2 days, `hermes.env` mode 0600.
 - [ ] Run `test_check.sh` and expect PASS. Run `shellcheck deploy/vps/*.sh` with zero findings.
-- [ ] Implement `bootstrap.sh` from the Global Constraints, in this order: apt upgrade → user `hermes` + copy authorized key → Docker Engine (official apt repo) → swapfile → unattended-upgrades → Tailscale `up --ssh=false` → sshd hardening, with `ListenAddress` bound to the Tailscale IP → ufw. Enable ufw last, after confirming Tailscale SSH works, so the session never locks itself out.
-- [ ] On the server: run `bootstrap.sh`, then `check.sh` → exit 0. From the Mac, `nc -zv <public-ip> 22` must time out. Log in once through the OVH KVM console (Review Focus 3).
+- [ ] Implement `bootstrap.sh` from the Global Constraints, in this order: apt upgrade → user `hermes` + copy authorized key → Docker Engine (official apt repo) → swapfile → unattended-upgrades → Tailscale `up --ssh=false` → sshd hardening → hermes unit and sudoers → ufw. Ruling: sshd listens on all addresses (no `ListenAddress`, which could lock us out if sshd starts before `tailscale0` exists) and ufw gates port 22 to `tailscale0`. Two lockout guards:
+  - Before any change, `bootstrap.sh` checks that the initial admin user has a password (`passwd -S` status `P`) for the OVH web KVM console. If not, it aborts and says to run `sudo passwd <admin-user>`.
+  - Before enabling ufw, it prints the Tailscale IP and waits. The operator confirms `ssh <admin-user>@<tailscale-ip>` works from a second terminal, then types `YES`. Anything else aborts. The pause is skipped only when ufw is already active with the compliant rules (a re-run).
+- [ ] On the server: `sudo apt install shellcheck` (shellcheck runs on the VPS, not the Mac), then `shellcheck deploy/vps/*.sh` with zero findings before the first deploy.
+- [ ] On the server: run `bootstrap.sh`, then `check.sh` → exit 0. From the Mac, `nc -zv <public-ip> 22` must time out. Log in once through the OVH KVM console with the admin user's password (Review Focus 3).
+- [ ] Install the CI public key (the public half of the `VPS_SSH_KEY` secret) into `/home/hermes/.ssh/authorized_keys`, prefixed with `from="100.64.0.0/10" ` so only tailnet addresses can use it.
+- [ ] Re-run `bootstrap.sh` whenever `hermes.service` or `hermes-sudoers` changes. The deploy workflow never re-installs them.
+- [ ] Security note: membership of the `docker` group makes `hermes` root-equivalent (it can start a privileged container). The scoped sudoers file is hygiene, not a security boundary. The real boundary is that only the CI key and the owner's key reach `hermes`, and only over the tailnet.
 - [ ] Commit: `[claude] vps: host bootstrap and weekly security check`.
 
 ### Task 2: Platform-neutral runtime provenance
@@ -111,7 +117,7 @@
 
 - [ ] Prune first (owner-approved pattern from 2026-10-30): move superseded `reports/` generations and `backups/` to `/Users/kgm3/Backups/Hermes/2026-11-vps-migration/`, keeping the latest rollback generation on Railway.
 - [ ] Pass 1 (live, cold data): stream with `railway ssh … 'tar -C /data --exclude=.hermes/state.db* --exclude=.hermes/state -cf - .' | ssh hermes-vps 'tar -C /srv/hermes/data -xf -'`. Record file count and total bytes on both sides; they must match.
-- [ ] Secrets: read the Railway variables through GraphQL and pipe them straight into `ssh hermes-vps 'sudo install -m600 /dev/stdin /etc/hermes/hermes.env'`. Drop `RAILWAY_*` and `PORT`. Add `DEPLOY_PLATFORM=vps` and `HERMES_SECURE_COOKIES=0` (no public HTTP). Verify the same 26 variable *names* exist (names only).
+- [ ] Secrets: read the Railway variables through GraphQL and pipe them straight into `ssh <admin-user>@hermes-vps 'sudo install -m600 /dev/stdin /etc/hermes/hermes.env'`. Use the admin user: `hermes` has no general sudo. The file must be in `docker --env-file` format: one `KEY=value` per line, no quotes (quotes become part of the value), no multi-line values. Drop `RAILWAY_*` and `PORT`. Add `DEPLOY_PLATFORM=vps` and `HERMES_SECURE_COOKIES=0` (no public HTTP). Verify the same 26 variable *names* exist (names only).
 - [ ] Commit `transfer.md` receipts: `[claude] vps: pre-cutover transfer receipts`.
 
 ### Task 4b: Off-site encrypted backup (before cutover)
@@ -135,15 +141,16 @@ Lesson from the OVH Strasbourg fire (2021): a backup stored with the same provid
 
 - [ ] Post in the Jesse Telegram chat: "Moving to new server, back in ~30 min." Wait for no running job executions (`hermes cron list` shows no `running`).
 - [ ] Stop Railway: remove the active deployment (the API `deploymentRemove`, as done for LoomAlpha). Confirm `/health/ready` on the Railway URL no longer answers 200.
+- [ ] Disable Railway autodeploy before anything else touches the VPS: disconnect the service's GitHub repo source (or scale replicas to 0). Pushes to `main`, including Jesse's own `request_redeploy` commits, must not start a Railway poller. Verify: push an empty commit and confirm no new Railway deployment appears.
 - [ ] Pass 2 (hot data): copy `.hermes/state.db*` and `.hermes/state/`. sha256 of `state.db` must be identical on both sides.
-- [ ] `touch /srv/hermes/RAILWAY_STOPPED`, then run `deploy.sh <current main sha>` → exit 0.
+- [ ] `touch /srv/hermes/RAILWAY_STOPPED` (only after the autodeploy step above is verified). Then set the repository variable `VPS_DEPLOY_ENABLED=true` and trigger `deploy-vps` with `workflow_dispatch`. A manual `deploy.sh` run is not possible: the host has no image and no registry login until the workflow builds and pushes. Expect the workflow to finish green.
 - [ ] Verify:
   - `/health/ready` reports `DEPLOY_COMMIT_SHA` equal to main;
   - the bookmark worker heartbeat is fresh;
   - one `trading-desk-watch-v1` run shows `ok`;
   - the owner sends "ping" and Jesse replies;
   - `check.sh` exits 0.
-- [ ] Rollback if any check fails within 2 hours: `systemctl stop hermes` → `rm RAILWAY_STOPPED` → `railway redeploy` the last good deployment. Railway's `/data` is untouched until decommission.
+- [ ] Rollback if any check fails within 2 hours, in this order: set `VPS_DEPLOY_ENABLED=false` → `sudo systemctl stop hermes` → `rm /srv/hermes/RAILWAY_STOPPED` → reconnect the Railway repo source and `railway redeploy` the last good deployment. Railway's `/data` is untouched until decommission.
 - [ ] Commit the receipts to `deploy/vps/transfer.md`: `[claude] vps: cutover receipts`.
 
 ### Task 6: Decommission and docs (cutover + 7 days, owner-approved deletes)
