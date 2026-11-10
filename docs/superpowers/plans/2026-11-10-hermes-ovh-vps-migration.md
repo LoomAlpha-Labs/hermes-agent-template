@@ -112,6 +112,23 @@
 - [ ] Secrets: read the Railway variables through GraphQL and pipe them straight into `ssh hermes-vps 'sudo install -m600 /dev/stdin /etc/hermes/hermes.env'`. Drop `RAILWAY_*` and `PORT`. Add `DEPLOY_PLATFORM=vps` and `HERMES_SECURE_COOKIES=0` (no public HTTP). Verify the same 26 variable *names* exist (names only).
 - [ ] Commit `transfer.md` receipts: `[claude] vps: pre-cutover transfer receipts`.
 
+### Task 4b: Off-site encrypted backup (before cutover)
+
+Lesson from the OVH Strasbourg fire (2021): a backup stored with the same provider is not a backup. OVH's included backup stays on, but the real one lives at a second company.
+
+**Files:**
+- Create: `deploy/vps/backup.sh`, `deploy/vps/hermes-backup.service`, `deploy/vps/hermes-backup.timer`
+- Modify: `deploy/vps/check.sh` (alert if the last successful snapshot is older than 36 h)
+- Test: `deploy/vps/test_check.sh` (stale-snapshot case)
+
+- [ ] Owner: create a Cloudflare R2 bucket `hermes-backup` (or Backblaze B2) and a bucket-scoped API key; paste the key into `/etc/hermes/backup.env` over SSH (mode 0600). Claude never sees the value.
+- [ ] `backup.sh`: `restic backup /srv/hermes/data` excluding caches, Docker layers and `*.db-wal`; SQLite files copied first with `sqlite3 <db> ".backup <tmp>"` so snapshots are consistent. Retention: `--keep-daily 7 --keep-weekly 4 --keep-monthly 3`, then `restic check --read-data-subset=1%` weekly.
+- [ ] Timer: daily 03:30 UTC (before the 04:30 reboot window).
+- [ ] Restic repo password: generated on the VPS, stored in `/etc/hermes/backup.env` AND in the owner's password manager (without it the backup is unreadable).
+- [ ] Restore drill: restore the latest snapshot to `/tmp/restore-test` and compare `state.db` sha256 and file count. Record in `transfer.md`.
+- [ ] Expected cost: ~40 GB → ~$0.25 (B2) to ~$0.60 (R2) per month.
+- [ ] Commit: `[claude] vps: nightly off-site restic backup + staleness check`.
+
 ### Task 5: Cutover
 
 - [ ] Post in the Jesse Telegram chat: "Moving to new server, back in ~30 min." Wait for no running job executions (`hermes cron list` shows no `running`).
