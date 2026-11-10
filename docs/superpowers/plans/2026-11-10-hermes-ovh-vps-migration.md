@@ -21,6 +21,8 @@
 - Exactly one Telegram poller at any time: Railway must be stopped before the VPS container starts.
 - Jesse's schedules, models, providers, budgets and trade gates are unchanged. Signature and hook verification stays enabled.
 - No new paid service other than the OVH VPS. Tailscale free tier is the only new dependency.
+- Tailnet ACL is one-way (owner concern, 2026-11-10): the owner's Mac → `tag:hermes:22` allowed; `tag:ci` → `tag:hermes:22` allowed; nothing may reach the Mac; everything else denied. The VPS joins as `tag:hermes`, so a compromised server cannot open connections to the Mac.
+- Sizing: VPS-3 is 12 GB RAM (€10.40/month ex VAT, checked 2026-11-10). Measured p99 7.8 GB, max 11.9 GB incl. reclaimable cache; 8 GB swap covers the rare peak. If Review Focus 5 fails, upgrade to VPS-4 (24 GB, €19.96).
 - Keep the Railway service and volume for 7 days after cutover as rollback; delete only with owner approval.
 
 ## Review Focus
@@ -38,7 +40,7 @@
 - [ ] Create the OVH account and enable 2FA.
 - [ ] Order VPS-3, EU location, Ubuntu 24.04. Paste the public key from `~/.ssh/hermes_vps.pub` at order time.
 - [ ] Send the server's public IPv4 address back in chat.
-- [ ] Approve `brew install --cask tailscale` on the Mac and log in to Tailscale with 2FA.
+- [ ] Run `brew install --cask tailscale` in the owner's own terminal (needs the Mac password), log in with 2FA, and paste the one-way ACL into the Tailscale admin console.
 
 ### Task 1: Host bootstrap and security check
 
