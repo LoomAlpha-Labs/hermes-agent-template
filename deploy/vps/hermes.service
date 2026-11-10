@@ -1,4 +1,6 @@
 [Unit]
+# Two-poller guard: never start while the Railway fallback may be active.
+ConditionPathExists=/srv/hermes/RAILWAY_STOPPED
 Description=Hermes Agent container
 Wants=network-online.target
 After=docker.service network-online.target

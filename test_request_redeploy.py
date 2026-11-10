@@ -256,13 +256,19 @@ class RequestRedeployTests(unittest.TestCase):
             "creator": {"login": "github-actions[bot]"},
             "payload": {"sha": NEW},
         }
-        runner, call = self._vps_run([dep], [{"state": "success"}])
+        runner, call = self._vps_run([dep], None)  # no statuses fetched, none needed
         result = call()  # no Railway args, no railway-app[bot] creator
+        self.assertEqual(
+            result["status"], "project_deployment_created_pending_target_verification"
+        )
+        self.assertIn("deployments?sha=", runner.calls[4][0][2])
+        self.assertIn("vps", json.loads(runner.calls[2][1]["input"])["message"].lower())
+        self.assertNotIn("Railway", json.loads(runner.calls[2][1]["input"])["message"])
         self.assertEqual(result["deployment_id"], 7)
         self.assertEqual(result["environment"], "vps-production")
         self.assertIn("vps-production", result["acceptance"])
 
-    def test_vps_rejects_wrong_environment_creator_sha_or_status(self):
+    def test_vps_rejects_wrong_environment_creator_or_sha(self):
         base = {
             "id": 7,
             "sha": NEW,
@@ -274,13 +280,12 @@ class RequestRedeployTests(unittest.TestCase):
             ({**base, "environment": "production"}, None),
             ({**base, "creator": {"login": "railway-app[bot]"}}, None),
             ({**base, "payload": {"sha": HEAD}}, None),
-            (base, [{"state": "failure"}, {"state": "in_progress"}]),
         ]
         for dep, statuses in bad:
             with self.subTest(dep=dep):
                 runner, call = self._vps_run([dep], statuses, timeout=4.0)
                 # polling repeats the deployments query; give extra empty responses
-                runner.responses += [(0, [])] * 5 + [(0, statuses or [])] * 5
+                runner.responses += [(0, [])] * 5
                 with self.assertRaises(DeploymentReceiptTimeout):
                     call()
 

@@ -74,13 +74,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          id=$(gh api "repos/${{ github.repository }}/deployments" \
-            -f ref="${{ github.sha }}" \
-            -f environment=vps-production \
-            -F auto_merge=false \
-            -F required_contexts='[]' \
-            -f 'payload={"sha":"${{ github.sha }}"}' \
-            --jq .id)
+          # Request body (real JSON types; gh -F would send "[]" as a string and get a 422):
+          #   {"ref":"<sha>","environment":"vps-production","auto_merge":false,
+          #    "required_contexts":[],"payload":{"sha":"<sha>"}}
+          id=$(jq -n --arg sha "${{ github.sha }}" \
+            '{ref:$sha, environment:"vps-production", auto_merge:false, required_contexts:[], payload:{sha:$sha}}' |
+            gh api "repos/${{ github.repository }}/deployments" --method POST --input - --jq .id)
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
       - name: Deploy on VPS
@@ -98,8 +97,14 @@ jobs:
           # deploy.sh from this exact commit is sent on stdin and read fully by cat first
           # (so no command inside the script can swallow the rest of the script).
           $SSH "bash -c \"\$(cat)\" deploy.sh '${{ github.sha }}' '${{ github.run_id }}'" < deploy/vps/deploy.sh || rc=$?
-          $SSH "docker logout ghcr.io" || true
           exit "$rc"
+
+      - name: Docker logout on host
+        if: ${{ always() && steps.deploy.conclusion != 'skipped' }}
+        env:
+          HOST: ${{ secrets.VPS_TAILNET_HOST }}
+        run: |
+          ssh -i "$HOME/.ssh/id_deploy" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 "hermes@$HOST" "docker logout ghcr.io" || echo "::warning::docker logout on host failed"
 
       - name: Mark deployment success
         if: ${{ success() }}
@@ -110,9 +115,9 @@ jobs:
             -f state=success -f description="health gate passed" >/dev/null
 
       - name: Mark deployment failure
-        if: ${{ failure() && steps.deployment.outputs.id != '' }}
+        if: ${{ (failure() || cancelled()) && steps.deployment.outputs.id != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/${{ github.repository }}/deployments/${{ steps.deployment.outputs.id }}/statuses" \
-            -f state=failure -f description="deploy failed or rolled back" >/dev/null
+            -f state=failure -f description="deploy failed, rolled back or cancelled" >/dev/null

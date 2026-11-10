@@ -35,11 +35,17 @@ VPS_CREATOR = "github-actions[bot]"
 
 
 class DeploymentReceiptTimeout(RuntimeError):
-    def __init__(self, commit_sha: str, timeout: float):
+    def __init__(self, commit_sha: str, timeout: float, vps: bool = False):
         self.commit_sha = commit_sha
+        label = "vps-production GitHub deployment" if vps else "Railway/GitHub deployment"
+        hint = (
+            "the deploy-vps workflow may be disabled or failing"
+            if vps
+            else "Watch Paths or autodeploy may block it"
+        )
         super().__init__(
-            f"commit {commit_sha[:12]} was pushed but no Railway/GitHub deployment "
-            f"record appeared within {timeout:g}s; Watch Paths or autodeploy may block it"
+            f"commit {commit_sha[:12]} was pushed but no {label} "
+            f"record appeared within {timeout:g}s; {hint}"
         )
 
 
@@ -171,7 +177,8 @@ def request_redeploy(
     if vps:
         plan["acceptance"] = (
             "GitHub deployment record in environment vps-production created by "
-            "github-actions[bot] with a success status for the new commit"
+            "github-actions[bot] for the new commit; the health-gated deploy result "
+            "still requires /health/ready on the VPS"
         )
     if not execute:
         return plan
@@ -181,7 +188,7 @@ def request_redeploy(
         f"repos/{repo}/git/commits",
         method="POST",
         payload={
-            "message": f"chore: request Railway redeploy\n\nReason: {reason}\nRequested-at: {stamp}",
+            "message": f"chore: request {'VPS' if vps else 'Railway'} redeploy\n\nReason: {reason}\nRequested-at: {stamp}",
             "tree": tree_sha,
             "parents": [head_sha],
         },
@@ -216,22 +223,9 @@ def request_redeploy(
                 and (item.get("creator") or {}).get("login") == VPS_CREATOR
                 and _vps_sha(item) == new_sha
             ]
-            deployment = None
-            for candidate in candidates:
-                statuses = _gh_value(
-                    f"repos/{repo}/deployments/{candidate.get('id')}/statuses?per_page=10",
-                    run=run,
-                )
-                if not isinstance(statuses, list):
-                    raise RuntimeError(
-                        "GitHub deployment statuses API returned an unexpected payload"
-                    )
-                if any(
-                    isinstance(status, dict) and status.get("state") == "success"
-                    for status in statuses
-                ):
-                    deployment = candidate
-                    break
+            # No success wait: the success status arrives only after deploy.sh restarts
+            # the container this script runs in. The record is the pending receipt.
+            deployment = candidates[0] if candidates else None
             if deployment is not None:
                 break
             sleep(poll_interval)
@@ -266,7 +260,7 @@ def request_redeploy(
             break
         sleep(poll_interval)
     if deployment is None:
-        raise DeploymentReceiptTimeout(new_sha, receipt_timeout)
+        raise DeploymentReceiptTimeout(new_sha, receipt_timeout, vps)
 
     return {
         **plan,

@@ -17,6 +17,7 @@ case "$1 $2" in
 esac
 case "$1" in
   pull) [ "${STUB_PULL_FAIL:-0}" = 1 ] && exit 1 ;;
+  tag) [ -n "${STUB_TAG_FAIL:-}" ] && [[ "$*" == *"$STUB_TAG_FAIL"* ]] && exit 1 ;;
   images) [ -f "$STUB_IMAGES" ] && cat "$STUB_IMAGES" ;;
 esac
 exit 0
@@ -92,12 +93,30 @@ d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
 runcase "$d" STUB_HEALTH=503 STUB_HAS_CURRENT=0
 [ "$rc" -eq 1 ]; check "first deploy failure exit 1" $?
 has "$d" "systemctl stop hermes"; check "first deploy failure stops service" $?
+has "$d" "docker rmi hermes-agent:current"; check "first deploy failure untags current" $?
+[ ! -e "$d/root/deploy.env" ]; check "first deploy failure removes deploy.env" $?
 
 # 5. pull failure -> exit 1, no restart
 d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
 runcase "$d" STUB_PULL_FAIL=1
 [ "$rc" -eq 1 ]; check "pull failure exit 1" $?
 ! has "$d" "systemctl"; check "pull failure leaves service alone" $?
+
+# 5b. tag failures fail the deploy without touching the running service or deploy.env
+for pat in "hermes-agent:current hermes-agent:previous" "ghcr.io/loomalpha-labs/hermes-agent:$SHA hermes-agent:current"; do
+  d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"
+  echo "DEPLOY_COMMIT_SHA=oldsha" >"$d/root/deploy.env"
+  runcase "$d" STUB_HAS_CURRENT=1 STUB_TAG_FAIL="$pat"
+  [ "$rc" -eq 1 ]; check "tag failure exit 1 ($pat)" $?
+  ! has "$d" "systemctl restart"; check "tag failure no restart ($pat)" $?
+  grep -qx "DEPLOY_COMMIT_SHA=oldsha" "$d/root/deploy.env"; check "tag failure deploy.env intact ($pat)" $?
+done
+# rollback retag fails -> stop, untag current, drop deploy.env
+d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"; echo "DEPLOY_COMMIT_SHA=oldsha" >"$d/root/deploy.env"
+runcase "$d" STUB_HEALTH=503 STUB_HAS_CURRENT=1 STUB_TAG_FAIL="hermes-agent:previous hermes-agent:current"
+[ "$rc" -eq 1 ]; check "rollback tag failure exit 1" $?
+has "$d" "systemctl stop hermes"; check "rollback tag failure stops" $?
+[ ! -e "$d/root/deploy.env" ]; check "rollback tag failure removes deploy.env" $?
 
 # 6. bad sha argument
 d="$(mkenv)"; touch "$d/root/RAILWAY_STOPPED"

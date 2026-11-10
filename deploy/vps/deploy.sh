@@ -55,13 +55,13 @@ docker pull "$NEW_REF" || { echo "pull failed; nothing changed" >&2; exit 1; }
 had_current=0
 if docker image inspect "$LOCAL_CURRENT" >/dev/null 2>&1; then
   had_current=1
-  docker tag "$LOCAL_CURRENT" "$LOCAL_PREVIOUS"
+  docker tag "$LOCAL_CURRENT" "$LOCAL_PREVIOUS" || { echo "tagging previous failed; nothing changed" >&2; exit 1; }
 fi
 prev_ref=""
 [ -f "$CUR_REF_FILE" ] && prev_ref="$(cat "$CUR_REF_FILE")"
 [ -f "$ENV_FILE" ] && cp -p "$ENV_FILE" "$ENV_FILE.prev"
-docker tag "$NEW_REF" "$LOCAL_CURRENT"
-write_env "$SHA" "$DEPLOY_ID"
+docker tag "$NEW_REF" "$LOCAL_CURRENT" || { echo "tagging new image failed; nothing changed" >&2; exit 1; }
+write_env "$SHA" "$DEPLOY_ID" || { echo "writing deploy.env failed" >&2; exit 1; }
 
 # 3. Restart and poll health.
 log "restart hermes ($SHA)"
@@ -80,15 +80,27 @@ fi
 # 4. Failure: restore previous, or stop if there was none.
 if [ "$healthy" -ne 1 ]; then
   echo "health check failed for $SHA" >&2
+  rolled_back=0
   if [ "$had_current" -eq 1 ]; then
     log "rollback to $LOCAL_PREVIOUS"
-    docker tag "$LOCAL_PREVIOUS" "$LOCAL_CURRENT"
-    if [ -f "$ENV_FILE.prev" ]; then mv "$ENV_FILE.prev" "$ENV_FILE"; else write_env "unknown" "rollback"; fi
-    sc restart hermes || echo "WARNING: restart of previous image failed" >&2
-    docker rmi "$NEW_REF" >/dev/null 2>&1 || true
-  else
-    log "no previous image; stopping hermes"
+    if docker tag "$LOCAL_PREVIOUS" "$LOCAL_CURRENT"; then
+      if [ -f "$ENV_FILE.prev" ]; then mv "$ENV_FILE.prev" "$ENV_FILE" && rolled_back=1
+      elif write_env "unknown" "rollback"; then rolled_back=1; fi
+    fi
+    if [ "$rolled_back" -eq 1 ]; then
+      sc restart hermes || echo "WARNING: restart of previous image failed" >&2
+      docker rmi "$NEW_REF" >/dev/null 2>&1 || true
+    else
+      echo "rollback failed; stopping hermes" >&2
+    fi
+  fi
+  if [ "$rolled_back" -ne 1 ]; then
+    # Nothing good to run: a reboot must not start the broken image, and the next
+    # deploy must not tag it as previous.
+    log "no usable previous image; stopping hermes and clearing current"
     sc stop hermes || true
+    docker rmi "$LOCAL_CURRENT" >/dev/null 2>&1 || true
+    rm -f "$ENV_FILE" "$ENV_FILE.prev"
   fi
   exit 1
 fi
