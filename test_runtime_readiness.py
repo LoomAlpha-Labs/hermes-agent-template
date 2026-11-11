@@ -58,6 +58,69 @@ class RuntimeReadinessTests(unittest.TestCase):
             environ=environ,
         )
 
+    def test_provenance_prefers_deploy_vars(self):
+        receipt = runtime_readiness.lifecycle_receipt(
+            "starting",
+            {"DEPLOY_COMMIT_SHA": "a" * 40, "RAILWAY_GIT_COMMIT_SHA": "b" * 40},
+        )
+        self.assertEqual(receipt["deployment"]["commit_sha"], "a" * 40)
+
+    def test_provenance_falls_back_to_railway(self):
+        receipt = runtime_readiness.lifecycle_receipt(
+            "starting", {"RAILWAY_GIT_COMMIT_SHA": "b" * 40}
+        )
+        self.assertEqual(receipt["deployment"]["commit_sha"], "b" * 40)
+
+    def test_provenance_empty_deploy_var_falls_back_to_railway(self):
+        receipt = runtime_readiness.lifecycle_receipt(
+            "starting",
+            {"DEPLOY_COMMIT_SHA": "", "RAILWAY_GIT_COMMIT_SHA": "b" * 40},
+        )
+        self.assertEqual(receipt["deployment"]["commit_sha"], "b" * 40)
+
+    def test_deploy_vars_satisfy_readiness_identity(self):
+        with (
+            patch.object(runtime_readiness, "_gateway_status", return_value=GOOD_GATEWAY),
+            patch.object(runtime_readiness, "_dashboard_status", return_value=GOOD_DASHBOARD),
+            patch.object(runtime_readiness, "_process_pressure", return_value=GOOD_PRESSURE),
+        ):
+            receipt = self._collect(
+                environ={
+                    "DEPLOY_PLATFORM": "vps",
+                    "DEPLOY_ID": "d1",
+                    "DEPLOY_COMMIT_SHA": "c" * 40,
+                    "DEPLOY_REPLICA_ID": "r1",
+                }
+            )
+        self.assertTrue(receipt["ready"])
+        self.assertEqual(receipt["deployment"]["platform"], "vps")
+        self.assertEqual(receipt["deployment"]["id"], "d1")
+
+    def test_platform_defaults_to_railway_only_with_railway_vars(self):
+        self.assertEqual(
+            runtime_readiness.lifecycle_receipt(
+                "starting", {"RAILWAY_DEPLOYMENT_ID": "x"}
+            )["deployment"]["platform"],
+            "railway",
+        )
+        self.assertIsNone(
+            runtime_readiness.lifecycle_receipt("starting", {})["deployment"]["platform"]
+        )
+
+    def test_secure_cookie_on_vps(self):
+        self.assertTrue(server._secure_cookie("http", {"HERMES_SECURE_COOKIES": "1"}))
+        self.assertTrue(server._secure_cookie("http", {"HERMES_SECURE_COOKIES": "true"}))
+
+    def test_secure_cookie_explicit_off_follows_scheme(self):
+        env = {"HERMES_SECURE_COOKIES": "0", "RAILWAY_ENVIRONMENT_ID": "env"}
+        self.assertFalse(server._secure_cookie("http", env))
+        self.assertTrue(server._secure_cookie("https", env))
+
+    def test_secure_cookie_unset_keeps_railway_behavior(self):
+        self.assertTrue(server._secure_cookie("http", {"RAILWAY_ENVIRONMENT_ID": "env"}))
+        self.assertFalse(server._secure_cookie("http", {}))
+        self.assertTrue(server._secure_cookie("https", {}))
+
     def test_ready_receipt_requires_functional_gateway_and_dashboard(self):
         with (
             patch.object(runtime_readiness, "_gateway_status", return_value=GOOD_GATEWAY),

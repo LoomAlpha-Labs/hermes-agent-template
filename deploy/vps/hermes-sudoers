@@ -1,0 +1,3 @@
+# Installed to /etc/sudoers.d/hermes by bootstrap.sh (mode 0440, visudo-checked).
+# deploy.sh runs as hermes and may control only the hermes unit.
+hermes ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes, /usr/bin/systemctl stop hermes, /usr/bin/systemctl start hermes, /usr/bin/systemctl is-active hermes

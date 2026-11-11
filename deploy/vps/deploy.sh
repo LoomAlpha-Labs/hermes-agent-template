@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Hermes VPS deploy. Runs on the host as user `hermes`:
+#   deploy.sh <commit-sha> [deploy-id]
+# The workflow runs `docker login ghcr.io` first (short-lived token) and logs out after.
+# Flow: guard -> pull -> tag current as previous -> restart -> health gate
+#       -> on failure restore previous (or stop if none) -> prune old images.
+# Exit codes: 0 deployed and healthy; 1 deploy failed (rolled back / stopped); 2 refused.
+# Healthy = /health/ready returns 200 AND reports commit_sha_prefix equal to the first
+# 12 chars of <commit-sha>. A container without a real identity is never written.
+# Env overrides (tests): HERMES_ROOT, IMAGE_REPO, PORT, HEALTH_TIMEOUT, HEALTH_INTERVAL.
+# Prints no secret values; deploy.env holds none.
+set -uo pipefail
+
+ROOT="${HERMES_ROOT:-/srv/hermes}"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/loomalpha-labs/hermes-agent}"
+PORT="${PORT:-8080}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
+HEALTH_INTERVAL="${HEALTH_INTERVAL:-5}"
+ENV_FILE="$ROOT/deploy.env"
+CUR_REF_FILE="$ROOT/current_ref"
+LOCAL_CURRENT="hermes-agent:current"
+LOCAL_PREVIOUS="hermes-agent:previous"
+
+log() { echo "==> $*"; }
+sc() { sudo -n systemctl "$@"; }
+
+# 0. Two-poller guard. Must run before anything is pulled or restarted.
+if [ ! -f "$ROOT/RAILWAY_STOPPED" ]; then
+  echo "refusing: Railway poller may be running (create $ROOT/RAILWAY_STOPPED only after Railway is stopped)" >&2
+  exit 2
+fi
+
+SHA="${1:-}"
+DEPLOY_ID="${2:-$SHA}"
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: deploy.sh <40-hex-commit-sha> [deploy-id]" >&2; exit 2; }
+[[ "$DEPLOY_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid deploy id" >&2; exit 2; }
+NEW_REF="$IMAGE_REPO:$SHA"
+
+# Host-side lock: two deploys can never overlap, whatever started them.
+exec 9>"$ROOT/deploy.lock"
+flock -n 9 || { echo "refusing: another deploy is running (lock $ROOT/deploy.lock)" >&2; exit 2; }
+
+write_env() {  # write_env <sha> <id>; atomic, no secrets
+  local tmp="$ENV_FILE.tmp.$$"
+  {
+    echo "IMAGE=$LOCAL_CURRENT"
+    echo "IMAGE_REF=$NEW_REF"
+    echo "PORT=$PORT"
+    echo "DEPLOY_PLATFORM=vps"
+    echo "DEPLOY_COMMIT_SHA=$1"
+    echo "DEPLOY_ID=$2"
+    echo "DEPLOY_REPLICA_ID=$(hostname)"
+  } >"$tmp" && chmod 644 "$tmp" && mv "$tmp" "$ENV_FILE"
+}
+
+# 1. Pull first: a failed pull changes nothing.
+log "pull $NEW_REF"
+docker pull "$NEW_REF" || { echo "pull failed; nothing changed" >&2; exit 1; }
+
+# 2. Remember what is running so we can roll back.
+had_current=0
+if docker image inspect "$LOCAL_CURRENT" >/dev/null 2>&1; then
+  had_current=1
+  docker tag "$LOCAL_CURRENT" "$LOCAL_PREVIOUS" || { echo "tagging previous failed; nothing changed" >&2; exit 1; }
+fi
+prev_ref=""
+[ -f "$CUR_REF_FILE" ] && prev_ref="$(cat "$CUR_REF_FILE")"
+[ -f "$ENV_FILE" ] && cp -p "$ENV_FILE" "$ENV_FILE.prev"
+docker tag "$NEW_REF" "$LOCAL_CURRENT" || { echo "tagging new image failed; nothing changed" >&2; exit 1; }
+write_env "$SHA" "$DEPLOY_ID" || { echo "writing deploy.env failed" >&2; exit 1; }
+
+# 3. Restart and poll health.
+log "restart hermes ($SHA)"
+healthy=0
+if sc restart hermes; then
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+  while :; do
+    if body="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health/ready")"; then
+      got="$(printf '%s' "$body" | sed -n 's/.*"commit_sha_prefix"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p')"
+      if [ -n "$got" ] && [ "$got" = "${SHA:0:12}" ]; then
+        healthy=1; break
+      fi
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep "$HEALTH_INTERVAL"
+  done
+fi
+
+# 4. Failure: restore previous, or stop if there was none.
+if [ "$healthy" -ne 1 ]; then
+  echo "health check failed for $SHA" >&2
+  rolled_back=0
+  if [ "$had_current" -eq 1 ]; then
+    log "rollback to $LOCAL_PREVIOUS"
+    if docker tag "$LOCAL_PREVIOUS" "$LOCAL_CURRENT"; then
+      # Only a saved env with a real identity may be restored; never fabricate one.
+      if [ -f "$ENV_FILE.prev" ]; then mv "$ENV_FILE.prev" "$ENV_FILE" && rolled_back=1; fi
+    fi
+    if [ "$rolled_back" -eq 1 ]; then
+      sc restart hermes || echo "WARNING: restart of previous image failed" >&2
+      docker rmi "$NEW_REF" >/dev/null 2>&1 || true
+    else
+      echo "rollback failed; stopping hermes" >&2
+    fi
+  fi
+  if [ "$rolled_back" -ne 1 ]; then
+    # Nothing good to run: a reboot must not start the broken image, and the next
+    # deploy must not tag it as previous.
+    log "no usable previous image; stopping hermes and clearing current"
+    sc stop hermes || true
+    docker rmi "$LOCAL_CURRENT" >/dev/null 2>&1 || true
+    rm -f "$ENV_FILE" "$ENV_FILE.prev"
+  fi
+  exit 1
+fi
+
+# 5. Success: record the running ref and prune all but 2 tags (new + previous).
+echo "$NEW_REF" >"$CUR_REF_FILE"
+rm -f "$ENV_FILE.prev"
+log "prune old images"
+docker images --format '{{.Repository}}:{{.Tag}}' "$IMAGE_REPO" 2>/dev/null |
+  while IFS= read -r ref; do
+    [ -z "$ref" ] && continue
+    [ "$ref" = "$NEW_REF" ] && continue
+    [ -n "$prev_ref" ] && [ "$ref" = "$prev_ref" ] && continue
+    docker rmi "$ref" >/dev/null 2>&1 || true
+  done
+log "deployed $SHA"
+exit 0

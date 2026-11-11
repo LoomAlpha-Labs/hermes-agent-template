@@ -30,15 +30,31 @@ from urllib.parse import quote
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+VPS_ENVIRONMENT = "vps-production"
+VPS_CREATOR = "github-actions[bot]"
 
 
 class DeploymentReceiptTimeout(RuntimeError):
-    def __init__(self, commit_sha: str, timeout: float):
+    def __init__(self, commit_sha: str, timeout: float, vps: bool = False):
         self.commit_sha = commit_sha
-        super().__init__(
-            f"commit {commit_sha[:12]} was pushed but no Railway/GitHub deployment "
-            f"record appeared within {timeout:g}s; Watch Paths or autodeploy may block it"
+        label = "vps-production GitHub deployment" if vps else "Railway/GitHub deployment"
+        hint = (
+            "the deploy-vps workflow may be disabled or failing"
+            if vps
+            else "Watch Paths or autodeploy may block it"
         )
+        super().__init__(
+            f"commit {commit_sha[:12]} was pushed but no {label} "
+            f"record appeared within {timeout:g}s; {hint}"
+        )
+
+
+def _vps_sha(item: dict) -> str:
+    """Commit a VPS deployment record is for: payload.sha, else the record's own sha."""
+    payload = item.get("payload")
+    if isinstance(payload, dict) and payload.get("sha"):
+        return str(payload["sha"])
+    return str(item.get("sha", ""))
 
 
 def _gh_value(
@@ -98,11 +114,12 @@ def request_redeploy(
     repo: str,
     branch: str,
     live_sha: str,
-    railway_environment_id: str,
-    railway_project_name: str,
-    railway_environment_name: str,
+    railway_environment_id: str = "",
+    railway_project_name: str = "",
+    railway_environment_name: str = "",
     reason: str,
     execute: bool,
+    platform: str = "railway",
     receipt_timeout: float = 120.0,
     poll_interval: float = 2.0,
     run: Run = subprocess.run,
@@ -114,13 +131,15 @@ def request_redeploy(
     if not branch or branch.startswith("-") or ".." in branch:
         raise ValueError("invalid branch")
     live_sha = _require_sha(live_sha, "Railway live deployment SHA")
+    vps = platform == "vps"
     railway_environment_id = railway_environment_id.strip()
     railway_project_name = railway_project_name.strip()
     railway_environment_name = railway_environment_name.strip()
-    if not railway_environment_id:
-        raise ValueError("Railway environment ID is required")
-    if not railway_project_name or not railway_environment_name:
-        raise ValueError("Railway project and environment names are required")
+    if not vps:
+        if not railway_environment_id:
+            raise ValueError("Railway environment ID is required")
+        if not railway_project_name or not railway_environment_name:
+            raise ValueError("Railway project and environment names are required")
 
     reason = " ".join(reason.split()).strip()
     if not reason:
@@ -155,6 +174,12 @@ def request_redeploy(
             "still requires /health/ready at the known service domain"
         ),
     }
+    if vps:
+        plan["acceptance"] = (
+            "GitHub deployment record in environment vps-production created by "
+            "github-actions[bot] for the new commit; the health-gated deploy result "
+            "still requires /health/ready on the VPS"
+        )
     if not execute:
         return plan
 
@@ -163,7 +188,7 @@ def request_redeploy(
         f"repos/{repo}/git/commits",
         method="POST",
         payload={
-            "message": f"chore: request Railway redeploy\n\nReason: {reason}\nRequested-at: {stamp}",
+            "message": f"chore: request {'VPS' if vps else 'Railway'} redeploy\n\nReason: {reason}\nRequested-at: {stamp}",
             "tree": tree_sha,
             "parents": [head_sha],
         },
@@ -189,6 +214,22 @@ def request_redeploy(
         if not isinstance(records, list):
             raise RuntimeError("GitHub deployments API returned an unexpected payload")
         expected_environment = f"{railway_project_name} / {railway_environment_name}"
+        if vps:
+            candidates = [
+                item
+                for item in records
+                if isinstance(item, dict)
+                and item.get("environment") == VPS_ENVIRONMENT
+                and (item.get("creator") or {}).get("login") == VPS_CREATOR
+                and _vps_sha(item) == new_sha
+            ]
+            # No success wait: the success status arrives only after deploy.sh restarts
+            # the container this script runs in. The record is the pending receipt.
+            deployment = candidates[0] if candidates else None
+            if deployment is not None:
+                break
+            sleep(poll_interval)
+            continue
         candidates = [
             item
             for item in records
@@ -219,7 +260,7 @@ def request_redeploy(
             break
         sleep(poll_interval)
     if deployment is None:
-        raise DeploymentReceiptTimeout(new_sha, receipt_timeout)
+        raise DeploymentReceiptTimeout(new_sha, receipt_timeout, vps)
 
     return {
         **plan,
@@ -231,8 +272,18 @@ def request_redeploy(
     }
 
 
-def _defaults() -> tuple[str, str, str, str, str, str]:
+def _defaults() -> tuple[str, str, str, str, str, str, str]:
     platform = _pid1_environment()
+    if platform.get("DEPLOY_PLATFORM") == "vps":
+        return (
+            platform.get("HERMES_GITHUB_REPO", "LoomAlpha-Labs/hermes-agent-template"),
+            platform.get("HERMES_GITHUB_BRANCH", "main"),
+            platform.get("DEPLOY_COMMIT_SHA", ""),
+            "",
+            "",
+            "",
+            "vps",
+        )
     owner = platform.get("RAILWAY_GIT_REPO_OWNER", "")
     name = platform.get("RAILWAY_GIT_REPO_NAME", "")
     repo = f"{owner}/{name}" if owner and name else ""
@@ -243,6 +294,7 @@ def _defaults() -> tuple[str, str, str, str, str, str]:
         platform.get("RAILWAY_ENVIRONMENT_ID", ""),
         platform.get("RAILWAY_PROJECT_NAME", ""),
         platform.get("RAILWAY_ENVIRONMENT_NAME", ""),
+        "railway",
     )
 
 
@@ -254,12 +306,17 @@ def main() -> int:
         railway_environment_id,
         railway_project_name,
         railway_environment_name,
+        deploy_platform,
     ) = _defaults()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=default_repo, help="GitHub OWNER/NAME")
     parser.add_argument("--branch", default=default_branch)
     parser.add_argument("--reason", required=True)
-    parser.add_argument("--receipt-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--receipt-timeout",
+        type=float,
+        default=900.0 if deploy_platform == "vps" else 120.0,
+    )
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -276,6 +333,7 @@ def main() -> int:
             railway_environment_name=railway_environment_name,
             reason=args.reason,
             execute=args.execute,
+            platform=deploy_platform,
             receipt_timeout=args.receipt_timeout,
         )
     except DeploymentReceiptTimeout as exc:

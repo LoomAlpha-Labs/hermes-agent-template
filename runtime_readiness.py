@@ -9,12 +9,35 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
 PID_HEADROOM_MIN = 32
 PID_HEADROOM_RATIO = 0.05
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _deploy_env(env: Mapping[str, str], name: str) -> str | None:
+    """Read DEPLOY_<name>, falling back to its Railway twin; "" counts as unset."""
+    legacy = {
+        "ID": "RAILWAY_DEPLOYMENT_ID",
+        "COMMIT_SHA": "RAILWAY_GIT_COMMIT_SHA",
+        "REPLICA_ID": "RAILWAY_REPLICA_ID",
+    }[name]
+    return env.get(f"DEPLOY_{name}") or env.get(legacy) or None
+
+
+def _deployment_provenance(env: Mapping[str, str]) -> dict:
+    platform = env.get("DEPLOY_PLATFORM") or (
+        "railway" if any(k.startswith("RAILWAY_") for k in env) else None
+    )
+    return {
+        "platform": platform,
+        "id": _deploy_env(env, "ID"),
+        "commit_sha": _deploy_env(env, "COMMIT_SHA"),
+        "replica_id": _deploy_env(env, "REPLICA_ID"),
+    }
 
 
 def _now() -> str:
@@ -176,11 +199,7 @@ def collect_runtime_readiness(
 ) -> dict:
     env = os.environ if environ is None else environ
     home = Path(hermes_home)
-    deployment = {
-        "id": env.get("RAILWAY_DEPLOYMENT_ID"),
-        "commit_sha": env.get("RAILWAY_GIT_COMMIT_SHA"),
-        "replica_id": env.get("RAILWAY_REPLICA_ID"),
-    }
+    deployment = _deployment_provenance(env)
     deployment_identity_present = bool(
         deployment["id"]
         and deployment["replica_id"]
@@ -225,11 +244,7 @@ def lifecycle_receipt(status: str, environ: dict[str, str] | None = None) -> dic
         "checked_at": _now(),
         "status": status,
         "ready": False,
-        "deployment": {
-            "id": env.get("RAILWAY_DEPLOYMENT_ID"),
-            "commit_sha": env.get("RAILWAY_GIT_COMMIT_SHA"),
-            "replica_id": env.get("RAILWAY_REPLICA_ID"),
-        },
+        "deployment": _deployment_provenance(env),
         "checks": {},
     }
 
