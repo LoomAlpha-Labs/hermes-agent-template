@@ -16,8 +16,13 @@ die() { echo "ABORT: $*" >&2; exit 1; }
 
 # 0. Console fallback guard. If Tailscale ever fails, the provider web console (OVH KVM, Hostinger browser terminal) is the only
 # way back in, and it needs a local password. Check it before changing anything.
+# Either the sudo user or root may hold the console password (Hostinger: root).
 KVM_USER="${INIT_USER:-root}"
 kvm_status="$(passwd -S "$KVM_USER" 2>/dev/null | awk '{print $2}')"
+if [ "$kvm_status" != "P" ] && [ "$KVM_USER" != root ]; then
+  KVM_USER=root
+  kvm_status="$(passwd -S root 2>/dev/null | awk '{print $2}')"
+fi
 [ "$kvm_status" = "P" ] || die "user '$KVM_USER' has no usable password for the provider web console. Run: sudo passwd $KVM_USER   then re-run this script."
 
 # 1. System update
