@@ -14,11 +14,11 @@ INIT_USER="${SUDO_USER:-}"
 log() { echo "==> $*"; }
 die() { echo "ABORT: $*" >&2; exit 1; }
 
-# 0. KVM fallback guard. If Tailscale ever fails, the OVH web KVM console is the only
+# 0. Console fallback guard. If Tailscale ever fails, the provider web console (OVH KVM, Hostinger browser terminal) is the only
 # way back in, and it needs a local password. Check it before changing anything.
 KVM_USER="${INIT_USER:-root}"
 kvm_status="$(passwd -S "$KVM_USER" 2>/dev/null | awk '{print $2}')"
-[ "$kvm_status" = "P" ] || die "user '$KVM_USER' has no usable password for the OVH web KVM console. Run: sudo passwd $KVM_USER   then re-run this script."
+[ "$kvm_status" = "P" ] || die "user '$KVM_USER' has no usable password for the provider web console. Run: sudo passwd $KVM_USER   then re-run this script."
 
 # 1. System update
 log "apt upgrade"
@@ -49,6 +49,25 @@ fi
 chown hermes:hermes /home/hermes/.ssh/authorized_keys 2>/dev/null || true
 chmod 600 /home/hermes/.ssh/authorized_keys 2>/dev/null || true
 [ -s /home/hermes/.ssh/authorized_keys ] || die "hermes has no authorized SSH key; refusing to disable password auth"
+
+# 2b. Admin login. Providers that only give root (e.g. Hostinger) would leave no
+# admin SSH login once PermitRootLogin is off, since hermes has only scoped sudo.
+# Create 'ops' with the same keys and full sudo (key-only SSH, reachable only over
+# Tailscale). Root keeps its console password for the provider's web console.
+if [ -n "$INIT_USER" ]; then
+  ADMIN_USER="$INIT_USER"
+else
+  ADMIN_USER=ops
+  log "admin user ops"
+  id ops >/dev/null 2>&1 || adduser --disabled-password --gecos "" ops
+  install -d -m 700 -o ops -g ops /home/ops/.ssh
+  install -m 600 -o ops -g ops /home/hermes/.ssh/authorized_keys /home/ops/.ssh/authorized_keys
+  tmp_ops="$(mktemp)"
+  echo "ops ALL=(ALL) NOPASSWD:ALL" >"$tmp_ops"
+  visudo -cf "$tmp_ops" >/dev/null || { rm -f "$tmp_ops"; die "ops sudoers failed visudo validation"; }
+  install -m 440 -o root -g root "$tmp_ops" /etc/sudoers.d/ops
+  rm -f "$tmp_ops"
+fi
 
 # 3. Docker Engine (official apt repo)
 log "docker"
@@ -164,8 +183,8 @@ else
   echo
   echo "About to enable the firewall. Public SSH will stop working."
   echo "Open a SECOND terminal and confirm this works first:"
-  echo "    ssh ${INIT_USER:-hermes}@$TS_IP"
-  echo "(Fallback if it fails later: OVH web KVM console, login '$KVM_USER' + its password.)"
+  echo "    ssh -i ~/.ssh/hermes_vps $ADMIN_USER@$TS_IP 'sudo -n true && echo admin-ok'"
+  echo "(Fallback if it fails later: the provider's web console, login '$KVM_USER' + its password.)"
   read -r -p "Type YES to enable ufw: " answer || die "no input; firewall not enabled"
   [ "$answer" = "YES" ] || die "confirmation not given; firewall not enabled"
 fi
