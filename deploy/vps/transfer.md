@@ -47,4 +47,4 @@ No secret values appear in this file.
 - Railway deployment 9a37c6e8 removed via `deploymentRemove` at ~01:29Z (status REMOVED). Volume untouched.
 - `/srv/hermes/RAILWAY_STOPPED` created 01:30Z; `VPS_DEPLOY_ENABLED=true`; deploy-vps run 42939409765 green (8m59s).
 - Verify: `/health/ready` ready, commit e07ce9bc5134 = main; one gateway + one bookmark worker in the container;
-  `trading-desk-watch-v1` last run 01:39:19Z `ok`; `check.sh` exit 0. Telegram ping: pending owner.
+  `trading-desk-watch-v1` last run 01:39:19Z `ok`; `check.sh` exit 0. Telegram ping: owner confirmed Jesse replied.
