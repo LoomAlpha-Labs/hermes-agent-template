@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+Environment=RESTIC_CACHE_DIR=/var/cache/restic
 ExecStart=/usr/local/lib/hermes/backup.sh
 Nice=10
 IOSchedulingClass=idle
