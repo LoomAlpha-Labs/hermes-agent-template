@@ -28,7 +28,23 @@ No secret values appear in this file.
 - Kept 24 Railway names; dropped `PORT`, 14 `RAILWAY_*` names and `WUFUN_RPC_URL` (null on Railway).
 - Added `DEPLOY_PLATFORM=vps`, `HERMES_SECURE_COOKIES=0`, `HERMES_ALERT_CHAT_ID` (owner Telegram chat).
 
-## Pass 2 — at cutover (pending)
+## Pass 2 — at cutover (2026-11-11)
 
-Re-copy with Jesse stopped on Railway: SQLite files (`*.db`, `*-wal`, `*-shm`) and every file newer than
-pass 1 start (2026-11-11T00:45:58Z), same direct route.
+- No cron job was running. Jesse was frozen in place on Railway with SIGSTOP (server, start.sh, bookmark
+  worker, dashboard, gateway) at 01:18:42Z, so the container stayed up for the copy but nothing polled
+  Telegram or wrote files.
+- Same direct encrypted route as pass 1, with a fresh one-time key. Railway egress IP was still 152.55.176.243.
+- Set: every regular file newer than 2026-11-11T00:45:58Z, every `*.db`, `*.db-wal`, `*.db-shm`, and all of
+  `.hermes/state/` — 250,560 files, 10,585,140,675 bytes sent = received. Exit codes 0 0 0 0 on both ends.
+- sha256 identical on both sides for `state.db`, `state.db-wal`, `state.db-shm`, `state.db.fts_rebuild.lock`.
+- Afterwards: ufw rule deleted, nothing listens on 47900, key shredded on both ends.
+- Known gap: files deleted on Railway after pass 1 started still exist on the VPS (pass 2 only adds/overwrites).
+
+## Cutover (2026-11-11)
+
+- Railway autodeploy disconnected first (service source repo = none); empty commit 434ddd2 to main created no
+  Railway deployment. Branch merged to main as e07ce9b.
+- Railway deployment 9a37c6e8 removed via `deploymentRemove` at ~01:29Z (status REMOVED). Volume untouched.
+- `/srv/hermes/RAILWAY_STOPPED` created 01:30Z; `VPS_DEPLOY_ENABLED=true`; deploy-vps run 42939409765 green (8m59s).
+- Verify: `/health/ready` ready, commit e07ce9bc5134 = main; one gateway + one bookmark worker in the container;
+  `trading-desk-watch-v1` last run 01:39:19Z `ok`; `check.sh` exit 0. Telegram ping: pending owner.
