@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes nightly off-site restic backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/hermes/backup.sh
+Nice=10
+IOSchedulingClass=idle

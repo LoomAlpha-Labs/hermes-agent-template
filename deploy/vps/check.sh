@@ -15,6 +15,8 @@
 #                           (file absent = no reboot pending)
 #   hermes_env_mode         octal mode of /etc/hermes/hermes.env, e.g. 600
 #   hermes_env_owner        owner:group of /etc/hermes/hermes.env, e.g. root:root
+#   backup_age_hours        whole hours since the last successful restic backup
+#                           (file absent = no successful backup recorded)
 # Without an override, the same files are gathered live from the host.
 set -u
 
@@ -23,6 +25,8 @@ if [ "${1:-}" = "--root" ]; then ROOT="${2:-}"; fi
 
 DATA_DIR=/srv/hermes/data
 ENV_FILE=/etc/hermes/hermes.env
+BACKUP_STAMP=/var/lib/hermes-backup/last-success
+MAX_BACKUP_AGE_H=36
 # 8 GiB swapfile reports 8388604 kB (mkswap header page); allow one 64 KiB page of slack.
 MIN_SWAP=$((8 * 1024 * 1024 * 1024 - 65536))
 
@@ -40,6 +44,9 @@ if [ -z "$ROOT" ]; then
   fi
   stat -c %a "$ENV_FILE" >"$ROOT/hermes_env_mode" 2>/dev/null
   stat -c %U:%G "$ENV_FILE" >"$ROOT/hermes_env_owner" 2>/dev/null
+  if [ -e "$BACKUP_STAMP" ]; then
+    echo $(( ( $(date +%s) - $(stat -c %Y "$BACKUP_STAMP") ) / 3600 )) >"$ROOT/backup_age_hours"
+  fi
 fi
 
 # True if any ALLOW/LIMIT rule without "on tailscale0" names port 22, a list or
@@ -142,6 +149,16 @@ fi
 owner="$(tr -d '[:space:]' <"$ROOT/hermes_env_owner" 2>/dev/null)"
 if [ "$owner" != "root:root" ]; then
   v "secrets: $ENV_FILE owner ${owner:-unknown}, want root:root"
+fi
+
+# --- off-site backup ---
+if have backup_age_hours; then
+  bage="$(tr -dc '0-9' <"$ROOT/backup_age_hours")"
+  if [ "${bage:-0}" -gt "$MAX_BACKUP_AGE_H" ]; then
+    v "backup: last successful snapshot ${bage}h ago (max ${MAX_BACKUP_AGE_H}h)"
+  fi
+else
+  v "backup: no successful snapshot recorded"
 fi
 
 if [ "${#violations[@]}" -gt 0 ]; then

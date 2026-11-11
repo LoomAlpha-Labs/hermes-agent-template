@@ -29,7 +29,7 @@ fi
 log "apt upgrade"
 apt-get update -y
 apt-get upgrade -y
-apt-get install -y ca-certificates curl gnupg ufw unattended-upgrades
+apt-get install -y ca-certificates curl gnupg ufw unattended-upgrades restic sqlite3
 
 # Reboot time below is local time; pin to UTC so 04:30 means 04:30 UTC.
 timedatectl set-timezone UTC
@@ -158,8 +158,12 @@ log "check timer"
 install -d /usr/local/lib/hermes
 install -m 755 "$HERE/check.sh" "$HERE/check-and-alert.sh" /usr/local/lib/hermes/
 install -m 644 "$HERE/hermes-check.service" "$HERE/hermes-check.timer" /etc/systemd/system/
+install -m 755 "$HERE/backup.sh" /usr/local/lib/hermes/
+install -m 644 "$HERE/hermes-backup.service" "$HERE/hermes-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now hermes-check.timer
+# Backup timer is enabled only once /etc/hermes/backup.env exists (owner adds the R2 key).
+[ -f /etc/hermes/backup.env ] && systemctl enable --now hermes-backup.timer
 
 # 8b. Hermes container unit + scoped sudo for deploy.sh (runs as hermes)
 log "hermes service + sudoers"

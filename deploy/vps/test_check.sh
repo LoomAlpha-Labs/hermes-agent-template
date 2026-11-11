@@ -31,6 +31,7 @@ S
   echo 42 >"$d/data_used_pct"
   echo 600 >"$d/hermes_env_mode"
   echo root:root >"$d/hermes_env_owner"
+  echo 5 >"$d/backup_age_hours"
   echo "$d"
 }
 
@@ -86,6 +87,13 @@ r=$(mkroot); echo ubuntu:root >"$r/hermes_env_owner"
 run "env owner" 1 "owner ubuntu:root, want root:root" "$r"
 r=$(mkroot); echo root:hermes >"$r/hermes_env_owner"
 run "env group" 1 "owner root:hermes, want root:root" "$r"
+
+r=$(mkroot); echo 37 >"$r/backup_age_hours"
+run "backup stale" 1 "backup: last successful snapshot 37h ago" "$r"
+r=$(mkroot); echo 36 >"$r/backup_age_hours"
+run "backup 36h ok" 0 "" "$r"
+r=$(mkroot); rm "$r/backup_age_hours"
+run "backup never ran" 1 "backup: no successful snapshot recorded" "$r"
 
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

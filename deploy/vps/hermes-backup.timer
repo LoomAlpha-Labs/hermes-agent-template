@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Hermes off-site backup (before the 04:30 UTC reboot window)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
