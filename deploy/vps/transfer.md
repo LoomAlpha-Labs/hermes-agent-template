@@ -48,3 +48,16 @@ No secret values appear in this file.
 - `/srv/hermes/RAILWAY_STOPPED` created 01:30Z; `VPS_DEPLOY_ENABLED=true`; deploy-vps run 42939409765 green (8m59s).
 - Verify: `/health/ready` ready, commit e07ce9bc5134 = main; one gateway + one bookmark worker in the container;
   `trading-desk-watch-v1` last run 01:39:19Z `ok`; `check.sh` exit 0. Telegram ping: owner confirmed Jesse replied.
+
+## Off-site backup + restore drill (2026-11-11)
+
+- Repo: restic `57f5b44e3a` in Cloudflare R2 bucket `hermes-backup` (bucket-scoped Object R/W token). Credentials and
+  repo password in `/etc/hermes/backup.env` (root 0600); owner keeps the repo password in a password manager. The
+  first password was rotated with `restic key passwd` before any data was uploaded (it was exposed in a transcript).
+- First snapshot `d0c75b58` (01:55Z, manual): 19 SQLite dbs via `sqlite3 .backup`, 0 plain copies; 308,959 files,
+  11,740 dirs, 21 symlinks; 29.5 GiB logical, compression 2.14x; upload took ~2.5 min. Caches, node_modules and
+  `.hermes/state/dashboard-portable` excluded by design.
+- Restore drill: full restore of `latest` to `/srv/restore-test` in 134 s, 308,959 files = snapshot. `PRAGMA
+  integrity_check` ok on restored `state.db` (2,893,496,320 bytes), `kanban.db`, `cron/executions.db`. Fingerprint of
+  all `.hermes/reports` files identical live vs restored. Restore dir removed afterwards.
+- Timer `hermes-backup.timer` daily 03:30 UTC; `check.sh` alerts if the last success is older than 36 h.
