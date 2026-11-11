@@ -78,6 +78,21 @@ if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
   ) &
 fi
 
+# Spend meter (noise-cut Phase 1): hourly Venice balance reading, and one
+# spend update to Agent Ops after 22:00 UTC. On by default; set
+# SPEND_METER_ENABLED=0 in hermes.env to turn it off. Read-only toward Hermes
+# state; writes only /data/.hermes/state/spend-meter/.
+if [ "${SPEND_METER_ENABLED:-1}" = "1" ]; then
+  (
+    while true; do
+      env -u X_OAUTH_CLIENT_ID -u X_OAUTH_CLIENT_SECRET -u X_OAUTH_REDIRECT_URI \
+        -u X_OAUTH_TOKEN_FILE -u X_BOOKMARK_OAUTH_BOOTSTRAP -u X_BIRD_AUTH_TOKEN \
+        -u X_BIRD_CT0 -u AUTH_TOKEN -u CT0 python /app/spend_meter.py worker || echo 'Spend meter stopped; restarting in 60s' >&2
+      sleep 60
+    done
+  ) &
+fi
+
 # Only the already-forked fixed bookmark worker needs X authorization. Unknown custom
 # variables are not necessarily removed by Hermes's generic terminal filter.
 # Remove them before the admin server/gateway/agent tree starts.
