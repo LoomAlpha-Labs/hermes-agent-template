@@ -196,6 +196,42 @@ class RuntimeReadinessTests(unittest.TestCase):
         self.assertFalse(receipt["checks"]["zero_zombies"])
         self.assertFalse(receipt["checks"]["pid_headroom_ok"])
 
+    def _collect_with_pressure(self, pressure):
+        with (
+            patch.object(runtime_readiness, "_gateway_status", return_value=GOOD_GATEWAY),
+            patch.object(runtime_readiness, "_dashboard_status", return_value=GOOD_DASHBOARD),
+            patch.object(runtime_readiness, "_process_pressure", return_value=pressure),
+        ):
+            return self._collect()
+
+    def test_one_dashboard_zombie_is_tolerated(self):
+        receipt = self._collect_with_pressure({**GOOD_PRESSURE, "zombies": 1, "dashboard_zombies": 1})
+        self.assertTrue(receipt["checks"]["zero_zombies"])
+        self.assertTrue(receipt["ready"])
+
+    def test_second_dashboard_zombie_or_foreign_zombie_fails(self):
+        for pressure in ({**GOOD_PRESSURE, "zombies": 2, "dashboard_zombies": 2},
+                         {**GOOD_PRESSURE, "zombies": 2, "dashboard_zombies": 1},
+                         {**GOOD_PRESSURE, "zombies": 1, "dashboard_zombies": 0}):
+            with self.subTest(pressure=pressure):
+                receipt = self._collect_with_pressure(pressure)
+                self.assertFalse(receipt["checks"]["zero_zombies"])
+                self.assertFalse(receipt["ready"])
+
+    def test_process_pressure_attributes_zombies_to_their_parent(self):
+        procs = {"100": "State:\tZ (zombie)\nPPid:\t13\n", "101": "State:\tZ (zombie)\nPPid:\t7\n",
+                 "102": "State:\tS (sleeping)\nPPid:\t13\n"}
+        with tempfile.TemporaryDirectory() as root:
+            for pid, status in procs.items():
+                (Path(root) / pid).mkdir()
+                (Path(root) / pid / "status").write_text(status)
+            real_path = runtime_readiness.Path
+            with patch.object(runtime_readiness, "Path",
+                              side_effect=lambda p, *a: real_path(root) if p == "/proc" else real_path(p, *a)):
+                pressure = runtime_readiness._process_pressure(dashboard_pid=13)
+        self.assertEqual(pressure["zombies"], 2)
+        self.assertEqual(pressure["dashboard_zombies"], 1)
+
     def test_receipt_write_is_atomic_and_private(self):
         target = self.home / "state" / "runtime-readiness.json"
         runtime_readiness.write_runtime_receipt({"status": "ready"}, target)

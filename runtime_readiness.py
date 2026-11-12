@@ -139,19 +139,36 @@ def _dashboard_status(url: str, expected_pid: int | None) -> dict:
     return result
 
 
-def _process_pressure() -> dict:
+# Hermes v0.23.1's `hermes dashboard` leaves one startup child unreaped for its
+# whole life (observed 2026-11-12: one zombie, PPid = dashboard, stable over minutes).
+# Tolerate exactly that one; any other zombie, or a second dashboard zombie, still
+# fails readiness, so a real fork leak keeps blocking deploys.
+DASHBOARD_ZOMBIE_ALLOWANCE = 1
+
+
+def _process_pressure(dashboard_pid: int | None = None) -> dict:
     zombies = 0
+    dashboard_zombies = 0
     proc = Path("/proc")
     if proc.is_dir():
         for entry in proc.iterdir():
             if not entry.name.isdigit():
                 continue
             try:
+                state = ppid = None
                 for line in (entry / "status").read_text().splitlines():
                     if line.startswith("State:"):
                         fields = line.split()
-                        zombies += int(len(fields) > 1 and fields[1] == "Z")
+                        state = fields[1] if len(fields) > 1 else None
+                    elif line.startswith("PPid:"):
+                        fields = line.split()
+                        ppid = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+                    if state is not None and ppid is not None:
                         break
+                if state == "Z":
+                    zombies += 1
+                    if dashboard_pid and ppid == dashboard_pid:
+                        dashboard_zombies += 1
             except (OSError, UnicodeDecodeError):
                 continue
 
@@ -179,12 +196,20 @@ def _process_pressure() -> dict:
         pass
     return {
         "zombies": zombies,
+        "dashboard_zombies": dashboard_zombies,
         "pids_current": current_raw,
         "pids_max": max_raw,
         "pid_headroom": headroom,
         "pid_headroom_required": headroom_required,
         "pid_headroom_ok": headroom_ok,
     }
+
+
+def _zombies_ok(pressure: Mapping) -> bool:
+    """No zombies except at most DASHBOARD_ZOMBIE_ALLOWANCE parented by the dashboard."""
+    dash = int(pressure.get("dashboard_zombies", 0) or 0)
+    other = int(pressure.get("zombies", 0) or 0) - dash
+    return other == 0 and dash <= DASHBOARD_ZOMBIE_ALLOWANCE
 
 
 def collect_runtime_readiness(
@@ -209,7 +234,7 @@ def collect_runtime_readiness(
     state_db = _state_db_status(home, required=configured)
     gateway = _gateway_status(home, gateway_pid)
     dashboard = _dashboard_status(dashboard_url, dashboard_pid)
-    pressure = _process_pressure()
+    pressure = _process_pressure(dashboard_pid)
     checks = {
         "home_present": home.is_dir(),
         "cron_store_present": (home / "cron").is_dir(),
@@ -217,7 +242,7 @@ def collect_runtime_readiness(
         "state_db_readable": state_db["readable"],
         "gateway_ready": gateway["verified"] if configured else True,
         "dashboard_ready": dashboard["verified"],
-        "zero_zombies": pressure["zombies"] == 0,
+        "zero_zombies": _zombies_ok(pressure),
         "pid_headroom_ok": pressure["pid_headroom_ok"],
         "deployment_identity_present": deployment_identity_present,
     }
