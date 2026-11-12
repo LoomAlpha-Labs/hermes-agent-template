@@ -23,8 +23,7 @@ if not _runtime_state_matches(fact, expected_stamp):
     raise RuntimeError('Packaged baseline selection is not current')
 probe = '''
 import importlib.metadata as m, io, json, wave
-expected = {'honcho-ai': '2.2.0', 'hindsight-client': '0.6.1',
-            'yt-dlp': '2026.8.19', 'yt-dlp-ejs': '0.8.0',
+expected = {'yt-dlp': '2026.8.19', 'yt-dlp-ejs': '0.8.0',
             'faster-whisper': '1.2.1', 'ctranslate2': '4.8.2',
             'onnxruntime': '1.30.0', 'av': '18.0.0'}
 for name, version in expected.items():

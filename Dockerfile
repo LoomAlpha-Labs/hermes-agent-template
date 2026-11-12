@@ -92,7 +92,6 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
       --extra bedrock --extra anthropic --extra edge-tts --extra vision \
       --output-file /tmp/hermes-requirements.txt && \
     uv pip install --system --no-cache --no-deps -r /tmp/hermes-requirements.txt && \
-    uv pip install --system --no-cache --constraint /tmp/hermes-requirements.txt honcho-ai==2.2.0 hindsight-client==0.6.1 && \
     uv pip install --system --no-cache --no-deps -e . && \
     python scripts/write_install_stamp.py --output install-stamp.json \
       --commit "${HERMES_COMMIT}" --base-version 0.22.5 --distance 0 \
@@ -102,8 +101,6 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
       --out /opt/hermes-agent/.venv --no-install-project --sealed --record-selection \
       --extra all --extra messaging --extra tts-premium --extra bedrock \
       --extra anthropic --extra edge-tts --extra vision && \
-    uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache \
-      --constraint /tmp/hermes-requirements.txt honcho-ai==2.2.0 hindsight-client==0.6.1 && \
     uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache --no-deps -e . && \
     python -c "import run_agent, gateway.run, cron.scheduler; from gateway.session_context import _VAR_MAP; assert 'HERMES_CRON_SESSION' in _VAR_MAP" && \
     uv venv --python /usr/local/bin/python --system-site-packages /tmp/hermes-check && \
