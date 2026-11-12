@@ -202,10 +202,10 @@ RUN uv pip install --system --no-cache -r /app/requirements.txt && \
     uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache -r /app/requirements.txt
 
 # Shared libraries Chromium needs for the browser tool, plus poppler-utils for
-# PDF text extraction. The helper-tools stage above bakes Chromium into
-# /opt/hermes-agent/tools, but not the system libs it links against. Installed
-# by hand in a running container they vanish on the next deploy (2026-11-12). Kept as its own late layer so the expensive
-# hermes build layers above stay cached. libnss3 pulls in Debian's libsqlite3-0;
+# PDF text extraction. Installed by hand in a running container they vanish on
+# the next deploy (2026-11-12); the browser stage right below needs them. Kept
+# as its own late layer so the expensive hermes build layers above stay
+# cached. libnss3 pulls in Debian's libsqlite3-0;
 # the pinned /opt/sqlite linkage is re-verified below and fails the build if it
 # loses precedence.
 RUN apt-get update && \
@@ -216,6 +216,13 @@ RUN apt-get update && \
       libglib2.0-0 libdbus-1-3 libexpat1 libuuid1 \
       poppler-utils && \
     rm -rf /var/lib/apt/lists/*
+
+# Bake the browser CLI and Chromium at the upstream lockfile's pins. In Docker
+# hermes never lazy-installs Chromium, so a hand install in the container is
+# lost on every deploy and the browser tool silently disappears. The script
+# fails the build if Chromium has an unresolved shared library.
+COPY scripts/stage_hermes_browser_tools.py /usr/local/libexec/hermes/stage-browser-tools.py
+RUN cd /opt/hermes-agent && python /usr/local/libexec/hermes/stage-browser-tools.py
 
 RUN mkdir -p /data/.hermes
 
