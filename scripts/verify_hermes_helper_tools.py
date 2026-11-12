@@ -32,8 +32,9 @@ for name in names:
         raise RuntimeError(f'{name} escaped the image store')
 # Changes only this process's PATH; does not install or touch configuration.
 problems = pm.activate()
-if any(name in problem for name in names for problem in problems):
-    raise RuntimeError('PM activation reports a required helper out of sync')
+bad = [problem for problem in problems if any(name in problem for name in names)]
+if bad:
+    raise RuntimeError(f'PM activation reports a required helper out of sync: {bad}')
 # Gateway CLI runs pm.activate at startup; verify its resulting PATH, not
 # the original SSH process environment or /proc's startup environment.
 for name, package in (('node', 'node'), ('npm', 'npm'), ('rg', 'ripgrep'), ('ffmpeg', 'ffmpeg')):
