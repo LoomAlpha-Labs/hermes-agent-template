@@ -35,7 +35,11 @@ w = wave.open(b, 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(160
 w.writeframes(bytes(32000)); w.close(); b.seek(0)
 assert len(decode_audio(b, sampling_rate=16000)) == 16000
 assert 'int8' in ctranslate2.get_supported_compute_types('cpu')
-print(json.dumps({'packages_verified': sorted(expected)}))
+print(json.dumps({'packages_verified': sorted(expected)}), flush=True)
+# Every check above has passed. Native media libraries (ctranslate2/onnxruntime/av)
+# can SIGSEGV during interpreter teardown on Python 3.14, which also swallowed the
+# buffered result line; skip finalizers so only real check failures fail the build.
+import os; os._exit(0)
 '''
 for executable in (Path(sys.executable), venv_python(selected)):
     subprocess.run([str(executable), '-c', probe], cwd=root, check=True, timeout=60)
