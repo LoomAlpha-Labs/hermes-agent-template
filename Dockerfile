@@ -50,8 +50,8 @@ RUN printf '%s\n' /opt/sqlite/lib > /etc/ld.so.conf.d/hermes-sqlite.conf && \
 # newest tag (format `vYYYY.M.D`, optionally with a `.PATCH` suffix, e.g.
 # `v2026.5.29.2`) and update the default below. Use `main` only if you accept
 # that every rebuild can pull arbitrary new upstream commits.
-ARG HERMES_REF=v0.22.5
-ARG HERMES_COMMIT=bf0203a794a07aac3ff764972ab9087baa4e4f4e
+ARG HERMES_REF=v0.23.1
+ARG HERMES_COMMIT=3b421578588243f920886e6fe79a6faa87ea026e
 
 # tini = tiny init that we run as PID 1. Without it, hermes's grandchild
 # processes (MCP stdio servers, git, bun, browser daemons spawned by tools)
@@ -94,7 +94,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     uv pip install --system --no-cache --no-deps -r /tmp/hermes-requirements.txt && \
     uv pip install --system --no-cache --no-deps -e . && \
     python scripts/write_install_stamp.py --output install-stamp.json \
-      --commit "${HERMES_COMMIT}" --base-version 0.22.5 --distance 0 \
+      --commit "${HERMES_COMMIT}" --base-version 0.23.1 --distance 0 \
       --source ci --distribution docker --update-mechanism external && \
     python /tmp/stage-hermes-pm-runtime.py && \
     python -m pm.build_env --source /opt/hermes-agent --python /usr/local/bin/python \
@@ -131,7 +131,7 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     cp -a /tmp/hermes-web/. /opt/hermes-agent/hermes_cli/web_dist/ && \
     rm -rf /tmp/hermes-icons /tmp/hermes-tui /tmp/hermes-web /opt/hermes-agent/.git /root/.npm
 ENV HERMES_WEB_DIST=/opt/hermes-agent/hermes_cli/web_dist
-RUN python -c "from pathlib import Path; from hermes_cli.version_info import get_version_info; from hermes_state_common import SCHEMA_VERSION; v=get_version_info(); assert v.base_version=='0.22.5' and v.commit=='bf0203a794a07aac3ff764972ab9087baa4e4f4e' and SCHEMA_VERSION==32; assert Path('/opt/hermes-agent/ui-tui/dist/entry.js').is_file(); assert Path('/opt/hermes-agent/hermes_cli/web_dist/index.html').is_file(); print('Exact 0.22.5 identity, schema32 and frontend products passed')"
+RUN python -c "from pathlib import Path; from hermes_cli.version_info import get_version_info; from hermes_state_common import SCHEMA_VERSION; v=get_version_info(); assert v.base_version=='0.23.1' and v.commit=='3b421578588243f920886e6fe79a6faa87ea026e' and SCHEMA_VERSION==33; assert Path('/opt/hermes-agent/ui-tui/dist/entry.js').is_file(); assert Path('/opt/hermes-agent/hermes_cli/web_dist/index.html').is_file(); print('Exact 0.23.1 identity, schema33 and frontend products passed')"
 
 # Why pre-build ui-tui (and why we don't delete it after):
 # - The dashboard's embedded Chat tab spawns `node ui-tui/dist/entry.js`
