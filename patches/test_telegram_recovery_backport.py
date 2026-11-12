@@ -1,4 +1,4 @@
-"""Behavior regressions for Jesse's in-place Telegram recovery."""
+"""Behavior regressions for Jesse's in-place Telegram recovery (rebased onto v0.23.1)."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 import httpx
@@ -28,7 +28,10 @@ async def test_reply_waits_for_polling_proof_and_is_sent_once():
 
 @pytest.mark.asyncio
 async def test_in_place_recovery_replays_ledger_once_for_owner():
+    # v0.23.1 ships this replay upstream (telegram_send_path_recovery.py); kept as a
+    # regression guard for Jesse. The upstream sweep only runs on a live adapter.
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="test-token"))
+    adapter._running = True
     adapter._owner_profile = "owner"
     adapter.gateway_runner = MagicMock()
     replay = adapter.gateway_runner._redeliver_failed_obligations_for_platform = AsyncMock(return_value=0)

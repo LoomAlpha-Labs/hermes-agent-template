@@ -9,7 +9,8 @@ from pm.lock import Facts
 from pm.store import current_target
 
 store = Path('/opt/hermes-agent/tools')
-names = ['node', 'npm', 'ffmpeg', 'ripgrep']
+# v0.23 pm/lock.json pins pnpm; without it PM's startup check reports drift.
+names = ['node', 'npm', 'pnpm', 'ffmpeg', 'ripgrep']
 before = Facts(store / 'facts.json', strict=True).get('venv')
 if not before:
     raise RuntimeError('Missing packaged application venv selection')

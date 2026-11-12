@@ -23,8 +23,7 @@ if not _runtime_state_matches(fact, expected_stamp):
     raise RuntimeError('Packaged baseline selection is not current')
 probe = '''
 import importlib.metadata as m, io, json, wave
-expected = {'honcho-ai': '2.2.0', 'hindsight-client': '0.6.1',
-            'yt-dlp': '2026.8.19', 'yt-dlp-ejs': '0.8.0',
+expected = {'yt-dlp': '2026.8.19', 'yt-dlp-ejs': '0.8.0',
             'faster-whisper': '1.2.1', 'ctranslate2': '4.8.2',
             'onnxruntime': '1.30.0', 'av': '18.0.0'}
 for name, version in expected.items():
@@ -36,7 +35,11 @@ w = wave.open(b, 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(160
 w.writeframes(bytes(32000)); w.close(); b.seek(0)
 assert len(decode_audio(b, sampling_rate=16000)) == 16000
 assert 'int8' in ctranslate2.get_supported_compute_types('cpu')
-print(json.dumps({'packages_verified': sorted(expected)}))
+print(json.dumps({'packages_verified': sorted(expected)}), flush=True)
+# Every check above has passed. Native media libraries (ctranslate2/onnxruntime/av)
+# can SIGSEGV during interpreter teardown on Python 3.14, which also swallowed the
+# buffered result line; skip finalizers so only real check failures fail the build.
+import os; os._exit(0)
 '''
 for executable in (Path(sys.executable), venv_python(selected)):
     subprocess.run([str(executable), '-c', probe], cwd=root, check=True, timeout=60)

@@ -19,7 +19,7 @@ from hermes_cli.web_routers.audio import _ffmpeg_s16le_mono
 
 root = Path('/opt/hermes-agent')
 store = root / 'tools'
-names = ('node', 'npm', 'ffmpeg', 'ripgrep')
+names = ('node', 'npm', 'pnpm', 'ffmpeg', 'ripgrep')
 if store_root().resolve() != store.resolve():
     raise RuntimeError('Active PM store is not the image-owned store')
 verified = verified_tools(names, source_store=store, target=current_target())
@@ -32,8 +32,10 @@ for name in names:
         raise RuntimeError(f'{name} escaped the image store')
 # Changes only this process's PATH; does not install or touch configuration.
 problems = pm.activate()
-if any(name in problem for name in names for problem in problems):
-    raise RuntimeError('PM activation reports a required helper out of sync')
+# Exact tool name before the colon: a substring match read 'pnpm: ...' as npm.
+bad = [problem for problem in problems if problem.split(':', 1)[0].strip() in names]
+if bad:
+    raise RuntimeError(f'PM activation reports a required helper out of sync: {bad}')
 # Gateway CLI runs pm.activate at startup; verify its resulting PATH, not
 # the original SSH process environment or /proc's startup environment.
 for name, package in (('node', 'node'), ('npm', 'npm'), ('rg', 'ripgrep'), ('ffmpeg', 'ffmpeg')):
