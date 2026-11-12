@@ -64,10 +64,13 @@ ARG HERMES_COMMIT=3b421578588243f920886e6fe79a6faa87ea026e
 #
 # Node.js is required only at build time to compile the Hermes React dashboard.
 # We strip the source + apt lists afterwards to keep the image lean.
+# v0.23 frontends need Node >=26 and pnpm (npm is refused); pnpm is pinned to the
+# version upstream's pm/lock.json pins, so its preinstall user-agent check passes.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates git gh tini && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
+    npm install --global pnpm@12.15.0 && pnpm --version && \
     rm -rf /var/lib/apt/lists/*
 
 COPY scripts/stage_hermes_pm_runtime.py /tmp/stage-hermes-pm-runtime.py
