@@ -201,6 +201,22 @@ COPY requirements.txt /app/requirements.txt
 RUN uv pip install --system --no-cache -r /app/requirements.txt && \
     uv pip install --python /opt/hermes-agent/.venv/bin/python --no-cache -r /app/requirements.txt
 
+# Shared libraries Chromium needs for the browser tool, plus poppler-utils for
+# PDF text extraction. The helper-tools stage above bakes Chromium into
+# /opt/hermes-agent/tools, but not the system libs it links against. Installed
+# by hand in a running container they vanish on the next deploy (2026-11-12). Kept as its own late layer so the expensive
+# hermes build layers above stay cached. libnss3 pulls in Debian's libsqlite3-0;
+# the pinned /opt/sqlite linkage is re-verified below and fails the build if it
+# loses precedence.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 \
+      libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+      libgbm1 libpango-1.0-0 libcairo2 libasound2 libx11-6 libxcb1 libxext6 \
+      libglib2.0-0 libdbus-1-3 libexpat1 libuuid1 \
+      poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN mkdir -p /data/.hermes
 
 COPY server.py /app/server.py
