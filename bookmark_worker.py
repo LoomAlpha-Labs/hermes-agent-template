@@ -9,12 +9,16 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path('/data/.hermes/workspace/wiki')
 LIVE = Path('/data/.hermes/scripts')
 STATE = Path('/data/.hermes/state/x-bookmark-review')
 INTERVAL = 3600
+DELTA_STATE = Path('/data/.hermes/state/delta-one-x')
+DELTA_INTERVAL = 900
+DELTA_COUNT = 50
 GENERATED_STATE_RULES = {
     'wiki/investing/assets/gocollect-watch/state.json':
         ('last_attempt_utc', 'last_good_utc'),
@@ -68,6 +72,128 @@ def collect_bird(environ=None):
             raise ValueError('Invalid bookmark response')
         ids.add(post['id'])
     return posts
+
+def collect_delta_tweets(environ=None):
+    """Read a bounded, recent profile window; never pass the cookie env to Jesse."""
+    result = subprocess.run(
+        ['bird', 'user-tweets', '@DeltaOne', '-n', str(DELTA_COUNT), '--json', '--plain'],
+        env=bird_env(os.environ if environ is None else environ),
+        capture_output=True, timeout=90)
+    if result.returncode:
+        raise ValueError('DeltaOne read failed')
+    try:
+        response = json.loads(result.stdout)
+    except (UnicodeError, ValueError):
+        raise ValueError('Invalid DeltaOne response') from None
+    # Bird 0.8.0 wraps user-tweets JSON when -n exceeds 20.
+    if not isinstance(response, dict) or not isinstance(response.get('tweets'), list):
+        raise ValueError('Invalid DeltaOne response')
+    tweets = response['tweets']
+    if not 1 <= len(tweets) <= DELTA_COUNT:
+        raise ValueError('Invalid DeltaOne response')
+    ids = set()
+    for tweet in tweets:
+        if (not isinstance(tweet, dict)
+                or not isinstance(tweet.get('id'), str)
+                or not re.fullmatch(r'[0-9]+', tweet['id'])
+                or tweet['id'] in ids
+                or not isinstance(tweet.get('text'), str)
+                or not isinstance(tweet.get('author'), dict)
+                or not isinstance(tweet['author'].get('username'), str)
+                or not tweet['author']['username']):
+            raise ValueError('Invalid DeltaOne response')
+        ids.add(tweet['id'])
+    if not any(t['author']['username'].casefold() == 'deltaone' for t in tweets):
+        raise ValueError('Invalid DeltaOne response')
+    return tweets
+
+
+def delta_event_tweets(tweets):
+    """Only the Jensen Huang board clearing/restoration story, not a profile feed."""
+    matches = []
+    for tweet in tweets:
+        if tweet['author']['username'].casefold() != 'deltaone':
+            continue  # A profile timeline may contain someone else's repost.
+        text = tweet['text'].casefold()
+        if (re.search(r'\b(?:jensen|huang)\b', text)
+                and re.search(r'\b(?:nvidia|nvda|board|ceo)\b', text)
+                and re.search(r'\b(?:clear(?:ed|ing|ance)?|exonerat(?:e|ed|ion)|'
+                              r'restor(?:e|ed|ation)|reinstat(?:e|ed|ement)|'
+                              r'reappoint(?:ed|ment)|return(?:ed|s|ing)?|'
+                              r'resume(?:d|s)?|back)\b', text)):
+            matches.append({'id': tweet['id'], 'text': tweet['text'],
+                            'author': 'DeltaOne',
+                            'url': f"https://x.com/DeltaOne/status/{tweet['id']}"})
+    return matches
+
+
+def private_atomic(path, value):
+    """Atomic replacement in a private directory; no predictable temporary name."""
+    directory = path.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink():
+        raise ValueError('DeltaOne state directory is not private')
+    directory.chmod(0o700)
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.snapshot-',
+                                         delete=False, encoding='utf-8') as out:
+            name = out.name
+            os.fchmod(out.fileno(), 0o600)
+            json.dump(value, out, indent=2)
+            out.write('\n')
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+    finally:
+        if name and os.path.exists(name):
+            os.unlink(name)
+
+
+def delta_cycle(state_dir=DELTA_STATE, clock=time.time):
+    """Independent deadline and failure surface; no bookmark sync/cron side effects."""
+    started = clock()
+    status_path = state_dir / 'worker-status.json'
+    state = {'status': 'running', 'started_at': started,
+             'next_run_at': started + DELTA_INTERVAL, 'interval_seconds': DELTA_INTERVAL}
+    private_atomic(status_path, state)
+    snapshot: dict[str, object] = {'collected_at_utc': datetime.now(timezone.utc).isoformat(),
+                'status': 'failed', 'source': '@DeltaOne',
+                'topic': 'Jensen Huang board clearing/restoration'}
+    try:
+        tweets = collect_delta_tweets()
+        snapshot.update(status='ok', posts=delta_event_tweets(tweets))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # Never record stderr, response fragments, exception text, or cookie values.
+        snapshot['reason'] = 'DeltaOne collection unavailable; inspect Bird session'
+    private_atomic(state_dir / 'snapshot.json', snapshot)
+    state.update(status='waiting', collection_status=snapshot['status'],
+                 completed_at=clock())
+    private_atomic(status_path, state)
+    return state
+
+
+def delta_main():
+    DELTA_STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if DELTA_STATE.is_symlink():
+        raise ValueError('DeltaOne state directory is not private')
+    DELTA_STATE.chmod(0o700)
+    lock_path = DELTA_STATE / 'worker.lock'
+    with lock_path.open('a') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        while True:
+            try:
+                previous = load(DELTA_STATE / 'worker-status.json', {})
+                if time.time() >= previous.get('next_run_at', 0):
+                    delta_cycle()
+            except (OSError, ValueError, TypeError):
+                # No exception text from Bird or the filesystem reaches logs.
+                print('{"worker":"delta-one","status":"failed"}', flush=True)
+            time.sleep(15)
 
 
 def jesse_env(environ):
@@ -289,4 +415,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['--delta']:
+        delta_main()
+    elif len(sys.argv) == 1:
+        main()
+    else:
+        raise ValueError('Unknown worker mode')

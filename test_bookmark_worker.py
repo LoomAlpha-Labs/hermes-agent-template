@@ -155,6 +155,83 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn('secret cookie',path.read_text())
             self.assertNotIn('secret cookie',(Path(td)/'snapshot.json').read_text())
 
+    def test_delta_fixed_command_cookies_and_event_filter(self):
+        env = {'PATH': '/bin', 'X_BIRD_AUTH_TOKEN': 'secret-a', 'X_BIRD_CT0': 'secret-b',
+               'X_OAUTH_CLIENT_SECRET': 'unused', 'OPENROUTER_API_KEY': 'unused'}
+        tweets = [
+            {'id': '101', 'text': 'Jensen Huang board clearance confirmed',
+             'author': {'username': 'DeltaOne'}, 'extra': {'secret': 'omit'}},
+            {'id': '102', 'text': 'Jensen Huang board restored',
+             'author': {'username': 'other'}},
+            {'id': '103', 'text': 'market opens higher', 'author': {'username': 'DeltaOne'}},
+            {'id': '104', 'text': 'Huang returns to board', 'author': {'username': 'DELTAONE'}}]
+        with patch.object(W.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({'tweets': tweets, 'nextCursor': 'cursor'}).encode())) as run:
+            self.assertEqual(W.collect_delta_tweets(env), tweets)
+        run.assert_called_once_with(
+            ['bird', 'user-tweets', '@DeltaOne', '-n', '50', '--json', '--plain'],
+            env={'PATH': '/bin', 'AUTH_TOKEN': 'secret-a', 'CT0': 'secret-b'},
+            capture_output=True, timeout=90)
+        selected = W.delta_event_tweets(tweets)
+        self.assertEqual([post['id'] for post in selected], ['101', '104'])
+        self.assertEqual(selected[0]['url'], 'https://x.com/DeltaOne/status/101')
+        self.assertNotIn('extra', selected[0])
+
+    def test_delta_rejects_malformed_partial_empty_or_error(self):
+        valid = {'id': '101', 'text': 'Jensen Huang board cleared',
+                 'author': {'username': 'DeltaOne'}}
+        bad = [[], [valid, valid], [valid] * 51,
+               [{'id': 101, 'text': 'x', 'author': {'username': 'DeltaOne'}}],
+               [{'id': '1', 'text': 'x', 'author': {'username': 'other'}}],
+               [{'id': '1', 'text': 'x', 'author': {}}], [None]]
+        with patch.object(W, 'bird_env', return_value={}), patch.object(W.subprocess, 'run') as run:
+            for tweets in bad:
+                with self.subTest(tweets=tweets):
+                    run.return_value = subprocess.CompletedProcess(
+                        [], 0, json.dumps({'tweets': tweets}).encode())
+                    with self.assertRaisesRegex(ValueError, 'Invalid DeltaOne response'):
+                        W.collect_delta_tweets({})
+            for payload in (b'[]', b'{"tweets":', b'\xff'):
+                run.return_value = subprocess.CompletedProcess([], 0, payload)
+                with self.assertRaisesRegex(ValueError, 'Invalid DeltaOne response'):
+                    W.collect_delta_tweets({})
+            run.return_value = subprocess.CompletedProcess([], 1, b'secret stdout', b'secret stderr')
+            with self.assertRaisesRegex(ValueError, '^DeltaOne read failed$'):
+                W.collect_delta_tweets({})
+
+    def test_delta_cycle_private_atomic_and_separate_deadline(self):
+        tweets = [{'id': '101', 'text': 'Jensen Huang board restored',
+                   'author': {'username': 'DeltaOne'}}]
+        with tempfile.TemporaryDirectory() as td, patch.object(W, 'collect_delta_tweets', return_value=tweets):
+            state_dir = Path(td) / 'delta'
+            state = W.delta_cycle(state_dir, clock=lambda: 100)
+            snapshot = state_dir / 'snapshot.json'
+            self.assertEqual(json.loads(snapshot.read_text())['posts'][0]['id'], '101')
+            self.assertEqual(state['next_run_at'], 1000)
+            self.assertEqual(state['collection_status'], 'ok')
+            self.assertEqual(state_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(list(state_dir.glob('.snapshot-*')))
+            self.assertFalse((state_dir / 'gate.json').exists())
+            self.assertFalse((state_dir / 'delivered.json').exists())
+            with patch.object(W, 'collect_delta_tweets', side_effect=subprocess.TimeoutExpired(
+                    ['bird'], 90, stderr=b'secret cookie')):
+                failed = W.delta_cycle(state_dir, clock=lambda: 1000)
+            data = snapshot.read_text()
+            self.assertEqual(failed['collection_status'], 'failed')
+            self.assertEqual(json.loads(data)['status'], 'failed')
+            self.assertNotIn('posts', json.loads(data))
+            self.assertNotIn('secret cookie', data)
+            self.assertEqual(failed['next_run_at'], 1900)
+
+    def test_delta_state_symlink_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); private = root / 'outside'; private.mkdir()
+            (root / 'delta').symlink_to(private, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'not private'):
+                W.private_atomic(root / 'delta' / 'snapshot.json', {'status': 'ok'})
+            self.assertFalse((private / 'snapshot.json').exists())
+
     def test_failed_delivery_does_not_acknowledge(self):
         with tempfile.TemporaryDirectory() as td,patch.object(W,'job_state',return_value={'last_run_at':'2026-09-27T15:00:00+00:00','last_status':'ok','last_delivery_error':'failed'}):
             with self.assertRaises(ValueError): W.acknowledge('a'*12,100,Path(td))

@@ -76,6 +76,14 @@ if [ "${X_BOOKMARK_REVIEW_ENABLED:-0}" = "1" ]; then
       sleep 30
     done
   ) &
+  # Separate fixed collector and 15-minute deadline; no cron/model dispatch.
+  # Fork before stripping cookies from the gateway environment below.
+  (
+    while true; do
+      python /app/bookmark_worker.py --delta || echo 'DeltaOne collector stopped; restarting in 30s' >&2
+      sleep 30
+    done
+  ) &
 fi
 
 # Spend meter (noise-cut Phase 1): hourly Venice balance reading, and one
